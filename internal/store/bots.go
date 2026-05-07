@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -211,6 +212,210 @@ func (p *Postgres) CountBots(ctx context.Context) (int, error) {
 	var n int
 	err := p.pool.QueryRow(ctx, `SELECT count(*) FROM bots WHERE deleted_at IS NULL`).Scan(&n)
 	return n, err
+}
+
+// CreateBot inserts a new bot row. Caller is responsible for tenant scope
+// (passing the right tenant_id from the authenticated identity). Returns
+// the inserted row id.
+func (p *Postgres) CreateBot(ctx context.Context, in BotWriteInput) (uuid.UUID, error) {
+	const q = `
+INSERT INTO bots (
+    tenant_id, slug, name, enabled,
+    bot_url, bot_first_byte_timeout_ms, bot_total_timeout_ms,
+    asr_provider, asr_endpoint, asr_token,
+    tts_provider, tts_endpoint, tts_token,
+    tts_voice_id, tts_tempo,
+    asr_silence_timeout_sec, asr_speech_timeout_sec, asr_speech_max_sec, asr_single_sentence,
+    bargein_enabled, bargein_min_words, filler_enabled,
+    created_by, updated_by
+)
+VALUES ($1,$2,$3,$4, $5,$6,$7, $8,$9,$10, $11,$12,$13,
+        $14,$15, $16,$17,$18,$19, $20,$21,$22, $23,$23)
+RETURNING id`
+	var id uuid.UUID
+	if err := p.pool.QueryRow(ctx, q,
+		in.TenantID, in.Slug, in.Name, in.Enabled,
+		in.BotURL, in.BotFirstByteTimeoutMs, in.BotTotalTimeoutMs,
+		in.ASRProvider, in.ASREndpoint, nullStr(in.ASRToken),
+		in.TTSProvider, in.TTSEndpoint, nullStr(in.TTSToken),
+		nullStr(in.TTSVoiceID), in.TTSTempo,
+		in.ASRSilenceTimeoutSec, in.ASRSpeechTimeoutSec, in.ASRSpeechMaxSec, in.ASRSingleSentence,
+		in.BargeInEnabled, in.BargeInMinWords, in.FillerEnabled,
+		in.ActorUserID,
+	).Scan(&id); err != nil {
+		return uuid.Nil, fmt.Errorf("create bot: %w", err)
+	}
+	return id, nil
+}
+
+// UpdateBot applies a full-record update with optimistic locking on
+// version. tokenPolicy controls whether the new asr/tts tokens replace
+// or preserve the existing ones (since the API masks tokens, the UI
+// only sends them when the user explicitly rotates).
+//
+// Returns ErrVersionMismatch if version on disk doesn't match expected.
+func (p *Postgres) UpdateBot(ctx context.Context, id uuid.UUID, in BotWriteInput, expectedVersion int) error {
+	const q = `
+UPDATE bots SET
+    slug                       = $1,
+    name                       = $2,
+    enabled                    = $3,
+    bot_url                    = $4,
+    bot_first_byte_timeout_ms  = $5,
+    bot_total_timeout_ms       = $6,
+    asr_provider               = $7,
+    asr_endpoint               = $8,
+    asr_token                  = CASE WHEN $9::int = 1 THEN $10 ELSE asr_token END,
+    tts_provider               = $11,
+    tts_endpoint               = $12,
+    tts_token                  = CASE WHEN $13::int = 1 THEN $14 ELSE tts_token END,
+    tts_voice_id               = $15,
+    tts_tempo                  = $16,
+    asr_silence_timeout_sec    = $17,
+    asr_speech_timeout_sec     = $18,
+    asr_speech_max_sec         = $19,
+    asr_single_sentence        = $20,
+    bargein_enabled            = $21,
+    bargein_min_words          = $22,
+    filler_enabled             = $23,
+    version                    = version + 1,
+    updated_by                 = $24
+WHERE id = $25 AND version = $26 AND deleted_at IS NULL`
+	tag, err := p.pool.Exec(ctx, q,
+		in.Slug, in.Name, in.Enabled,
+		in.BotURL, in.BotFirstByteTimeoutMs, in.BotTotalTimeoutMs,
+		in.ASRProvider, in.ASREndpoint,
+		boolToInt(in.ReplaceASRToken), nullStr(in.ASRToken),
+		in.TTSProvider, in.TTSEndpoint,
+		boolToInt(in.ReplaceTTSToken), nullStr(in.TTSToken),
+		nullStr(in.TTSVoiceID), in.TTSTempo,
+		in.ASRSilenceTimeoutSec, in.ASRSpeechTimeoutSec, in.ASRSpeechMaxSec, in.ASRSingleSentence,
+		in.BargeInEnabled, in.BargeInMinWords, in.FillerEnabled,
+		in.ActorUserID,
+		id, expectedVersion,
+	)
+	if err != nil {
+		return fmt.Errorf("update bot: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrVersionMismatch
+	}
+	return nil
+}
+
+// SoftDeleteBot marks the bot as deleted (deleted_at = now()). Bot row
+// stays so call_history.bot_id keeps its FK target.
+func (p *Postgres) SoftDeleteBot(ctx context.Context, id uuid.UUID) error {
+	_, err := p.pool.Exec(ctx,
+		`UPDATE bots SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL`, id)
+	return err
+}
+
+// AddDID maps a DID → bot. Returns ErrDIDTaken if the DID is already
+// owned by some other bot (DID is unique global per the schema).
+func (p *Postgres) AddDID(ctx context.Context, did string, botID uuid.UUID, note string) error {
+	_, err := p.pool.Exec(ctx,
+		`INSERT INTO bot_inbound_dids (did, bot_id, note) VALUES ($1, $2, $3)`,
+		did, botID, nullStr(note))
+	if err != nil && isUniqueViolation(err) {
+		return ErrDIDTaken
+	}
+	return err
+}
+
+// RemoveDID deletes the mapping. Idempotent — no error if the DID
+// wasn't there to begin with.
+func (p *Postgres) RemoveDID(ctx context.Context, did string) error {
+	_, err := p.pool.Exec(ctx,
+		`DELETE FROM bot_inbound_dids WHERE did = $1`, did)
+	return err
+}
+
+// ListDIDs returns the DIDs assigned to a given bot, oldest first.
+func (p *Postgres) ListDIDs(ctx context.Context, botID uuid.UUID) ([]DIDRecord, error) {
+	rows, err := p.pool.Query(ctx,
+		`SELECT did, bot_id, COALESCE(note,''), created_at
+		   FROM bot_inbound_dids WHERE bot_id = $1 ORDER BY created_at`,
+		botID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []DIDRecord
+	for rows.Next() {
+		var r DIDRecord
+		if err := rows.Scan(&r.DID, &r.BotID, &r.Note, &r.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+type DIDRecord struct {
+	DID       string
+	BotID     uuid.UUID
+	Note      string
+	CreatedAt time.Time
+}
+
+// BotWriteInput is the create/update payload the API constructs from
+// incoming JSON. ReplaceASRToken/ReplaceTTSToken are sentinels: when
+// false, the existing token in DB is preserved (so masked tokens can
+// safely round-trip through the form without leaking plaintext).
+type BotWriteInput struct {
+	TenantID uuid.UUID
+	Slug     string
+	Name     string
+	Enabled  bool
+
+	BotURL                string
+	BotFirstByteTimeoutMs int
+	BotTotalTimeoutMs     int
+
+	ASRProvider     string
+	ASREndpoint     string
+	ASRToken        string
+	ReplaceASRToken bool
+
+	TTSProvider     string
+	TTSEndpoint     string
+	TTSToken        string
+	ReplaceTTSToken bool
+
+	TTSVoiceID            string
+	TTSTempo              float64
+	ASRSilenceTimeoutSec  int
+	ASRSpeechTimeoutSec   int
+	ASRSpeechMaxSec       int
+	ASRSingleSentence     bool
+
+	BargeInEnabled  bool
+	BargeInMinWords int
+	FillerEnabled   bool
+
+	ActorUserID *uuid.UUID
+}
+
+// ErrVersionMismatch is returned by UpdateBot when the caller's expected
+// version doesn't match the row's current version — UI should refetch
+// and show a "stale form" notice.
+var ErrVersionMismatch = errors.New("bot version mismatch (someone else updated)")
+
+// ErrDIDTaken is returned by AddDID when the DID is already mapped.
+var ErrDIDTaken = errors.New("DID already assigned to another bot")
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// isUniqueViolation matches Postgres SQLSTATE 23505 by string-matching
+// on the formatted error rather than importing pgx/pgconn types.
+func isUniqueViolation(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "23505")
 }
 
 type SeedBotInput struct {
