@@ -333,11 +333,40 @@ func (p *Pipeline) Speak(ctx context.Context, src AudioSource, sink AudioSink, m
 		monitor = newBargeInMonitor(p.UUID, p.VAD, src, 32000) // ~2s @ 8k S16LE
 		monitor.start(ctx)
 		defer monitor.stop()
-	} else if p.VAD != nil {
-		// Even without barge-in, mark bot-speaking so the next Listen.Reset
-		// is a clean slate.
-		p.VAD.SetBotSpeaking(true)
-		defer p.VAD.SetBotSpeaking(false)
+	} else {
+		if p.VAD != nil {
+			// Mark bot-speaking so the next Listen.Reset is a clean slate.
+			p.VAD.SetBotSpeaking(true)
+			defer p.VAD.SetBotSpeaking(false)
+		}
+		// Drain caller audio while we're speaking so it doesn't pile up in
+		// the FIFO. Otherwise the next Listen reads stale frames (bot's
+		// own TTS echoed back through the handset) — ASR finalizes them
+		// as empty transcripts and the bot keeps replying to silence,
+		// creating the "bot repeats the same line" loop. We discard here
+		// because barge-in is off; live VAD-driven interrupt is the
+		// barge-in path above.
+		if src != nil {
+			drainStop := make(chan struct{})
+			drainDone := make(chan struct{})
+			go func() {
+				defer close(drainDone)
+				for {
+					select {
+					case <-drainStop:
+						return
+					case _, ok := <-src.Frames():
+						if !ok {
+							return
+						}
+					}
+				}
+			}()
+			defer func() {
+				close(drainStop)
+				<-drainDone
+			}()
+		}
 	}
 
 	turnStream, err := p.Bot.Stream(botCtx, p.UUID, message)
@@ -537,6 +566,12 @@ func (p *Pipeline) Speak(ctx context.Context, src AudioSource, sink AudioSink, m
 // Each invocation appends one TurnRecord to p.history with the transcript,
 // concatenated bot text, action, and barge-in flag — used by SessionRunner
 // to persist call_history at end of call.
+//
+// Empty-transcript handling: a non-greeting turn that produces no
+// transcript (caller silent or only echoed audio) does NOT call the bot.
+// Calling the bot with "" makes it emit the greeting fallback every turn,
+// which manifests as "the bot keeps repeating the same line." We loop
+// back to Listen so the next caller utterance gets a real reply.
 func (p *Pipeline) RunTurn(ctx context.Context, src AudioSource, sink AudioSink) (bool, error) {
 	turnStart := time.Now()
 	var transcript string
@@ -546,6 +581,11 @@ func (p *Pipeline) RunTurn(ctx context.Context, src AudioSource, sink AudioSink)
 			return false, err
 		}
 		transcript = t
+		if transcript == "" {
+			slog.Info("pipeline.turn skipping bot (empty transcript)",
+				"call_uuid", p.UUID)
+			return true, nil
+		}
 	}
 
 	action, err := p.Speak(ctx, src, sink, transcript)

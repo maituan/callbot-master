@@ -108,14 +108,16 @@ func TestSpeak_NoBargeIn_NoMonitorWhenDisabled(t *testing.T) {
 		t.Fatal("pendingReplay should be empty when barge-in disabled")
 	}
 
-	// src should still have its frame (not consumed).
+	// With barge-in off, Speak still drains src into /dev/null so audio
+	// doesn't pile up between turns. Frame should be consumed (no leftover
+	// for the next Listen).
 	select {
-	case f := <-src.ch:
-		if len(f) != 320 {
-			t.Fatalf("unexpected frame size %d", len(f))
+	case _, ok := <-src.ch:
+		if ok {
+			t.Fatal("expected src to be drained by Speak (got an unread frame)")
 		}
 	default:
-		t.Fatal("src frame was unexpectedly consumed")
+		// Closed-or-empty is fine; we asserted "no unread leftover" above.
 	}
 }
 
