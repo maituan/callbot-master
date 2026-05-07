@@ -25,6 +25,7 @@ import (
 	"callbot-master/internal/freeswitch"
 	"callbot-master/internal/metrics"
 	"callbot-master/internal/pipeline"
+	"callbot-master/internal/recording"
 	"callbot-master/internal/session"
 	"callbot-master/internal/store"
 	"callbot-master/internal/telemetry"
@@ -139,6 +140,29 @@ func main() {
 		runner.Store = pgStore
 	}
 
+	// Optional recording archiver — copies FS-side MP3 to a persistent
+	// dir post-hangup and writes the resulting URL into call_history.
+	// Disabled if SourceDir or ArchiveDir is empty.
+	var archiver *recording.Archiver
+	if cfg.Recording.SourceDir != "" && cfg.Recording.ArchiveDir != "" {
+		var persister recording.URLPersister
+		if pgStore != nil {
+			persister = pgStore
+		}
+		archiver = recording.New(
+			cfg.Recording.SourceDir,
+			cfg.Recording.ArchiveDir,
+			cfg.Recording.URLPrefix,
+			cfg.Recording.FileExt,
+			persister,
+		)
+		runner.Archiver = archiver
+		slog.Info("recording archiver wired",
+			"source", cfg.Recording.SourceDir,
+			"archive", cfg.Recording.ArchiveDir,
+			"url_prefix", cfg.Recording.URLPrefix)
+	}
+
 	// Wire PLAYBACK_STOP listener — Speak uses it to know when FS finished
 	// playing each utterance.
 	runner.RegisterESLHandlers()
@@ -172,6 +196,11 @@ func main() {
 		callReader = pgStore
 	}
 	api.RegisterCalls(router.Mux(), api.CallsDeps{Store: callReader})
+
+	// Serve archived recordings under URLPrefix from ArchiveDir.
+	if archiver != nil && cfg.Recording.URLPrefix != "" {
+		router.MountStaticDir(cfg.Recording.URLPrefix, cfg.Recording.ArchiveDir)
+	}
 	srv := &http.Server{
 		Addr:              cfg.Server.HTTPAddr,
 		Handler:           router.Handler(),

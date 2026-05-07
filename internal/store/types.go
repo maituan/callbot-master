@@ -30,6 +30,7 @@ type CallRecord struct {
 	Action       string    `json:"action,omitempty"`
 	History      []Turn    `json:"history"`
 	ErrorMessage string    `json:"error_message,omitempty"`
+	RecordingURL string    `json:"recording_url,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
 }
 

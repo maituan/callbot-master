@@ -21,6 +21,11 @@ CREATE TABLE IF NOT EXISTS call_history (
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Audio recording URL (master archives FS's MP3 into a persistent dir
+-- and serves it over HTTP). Added with ALTER for backwards compatibility
+-- with deployments where call_history was created by an earlier schema.
+ALTER TABLE call_history ADD COLUMN IF NOT EXISTS recording_url TEXT;
+
 CREATE INDEX IF NOT EXISTS idx_call_history_phone_time
     ON call_history (phone, start_time DESC);
 

@@ -55,6 +55,10 @@ services:
       # use a different DB (e.g. host's own pg on 5432, or a managed
       # cloud DB), export MASTER_PG_DSN and skip the postgres service.
       MASTER_PG_DSN: "${MASTER_PG_DSN:-postgres://callbot:callbot@127.0.0.1:5433/callbot?sslmode=disable}"
+      MASTER_RECORDING_SOURCE_DIR: "${MASTER_RECORDING_SOURCE_DIR:-/var/lib/freeswitch/recordings/voiceai-hotline}"
+      MASTER_RECORDING_ARCHIVE_DIR: "${MASTER_RECORDING_ARCHIVE_DIR:-/var/lib/callbot/recordings}"
+      MASTER_RECORDING_URL_PREFIX: "${MASTER_RECORDING_URL_PREFIX:-/recordings}"
+      MASTER_RECORDING_FILE_EXT: "${MASTER_RECORDING_FILE_EXT:-.mp3}"
       MASTER_LOG_LEVEL: "${MASTER_LOG_LEVEL:-info}"
       MASTER_LOG_FORMAT: "${MASTER_LOG_FORMAT:-json}"
       OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
@@ -63,6 +67,10 @@ services:
     volumes:
       # Shared with FreeSWITCH on the host: master writes TTS, reads recordings.
       - /dev/shm/bridge:/dev/shm/bridge
+      # FS-side stereo MP3 recordings — read-only, master archives them out.
+      - /var/lib/freeswitch/recordings:/var/lib/freeswitch/recordings:ro
+      # Persistent archive — master writes here; HTTP serves under /recordings.
+      - /var/lib/callbot/recordings:/var/lib/callbot/recordings
     depends_on:
       postgres:
         condition: service_healthy

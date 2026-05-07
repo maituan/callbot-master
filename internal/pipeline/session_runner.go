@@ -22,6 +22,7 @@ import (
 	"callbot-master/internal/bot"
 	"callbot-master/internal/freeswitch"
 	"callbot-master/internal/metrics"
+	"callbot-master/internal/recording"
 	"callbot-master/internal/session"
 	"callbot-master/internal/store"
 	"callbot-master/internal/tts"
@@ -48,6 +49,7 @@ type SessionRunner struct {
 	BargeMinWords int                 // word threshold; 0 → use Pipeline default (3)
 	Metrics       *metrics.Collectors // nil-safe
 	Store        CallStore           // nil-safe — when set, every call is persisted at end of Run
+	Archiver     *recording.Archiver // nil-safe — copies FS recording to persistent dir post-hangup
 
 	// playbackStops maps a FIFO path → *playbackHandle for the in-flight
 	// utterance on that path. We key by FULL PATH (not uuid) because FS
@@ -251,6 +253,25 @@ func (r *SessionRunner) Run(parent context.Context, opts RunOpts) (retErr error)
 				"call_uuid", opts.UUID, "err", err)
 		}
 	}()
+
+	// Archive the FS-side recording out-of-band. Runs in its own
+	// goroutine because the source MP3 typically isn't flushed for a
+	// few seconds after CHANNEL_HANGUP_COMPLETE — we don't want to
+	// hold up the rest of the cleanup waiting on disk I/O. Persists
+	// the resulting URL into call_history (the goroutine outlives
+	// Run, which is fine — Persister handles its own ctx).
+	if r.Archiver != nil && r.Archiver.Enabled() {
+		defer func(uuid string) {
+			go func() {
+				archiveCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+				defer cancel()
+				if _, err := r.Archiver.Archive(archiveCtx, uuid); err != nil {
+					slog.Warn("recording archive failed",
+						"call_uuid", uuid, "err", err)
+				}
+			}()
+		}(opts.UUID)
+	}
 
 	// Root call span. Children: pipeline.greeting → pipeline.turn[N], each
 	// of which contains asr.listen / bot.turn / tts.turn.

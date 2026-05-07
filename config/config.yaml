@@ -56,6 +56,15 @@ filler:
 postgres:
   dsn: ""
 
+# Audio recording archive — master copies FS's stereo MP3 from source_dir
+# to archive_dir post-hangup, persists the URL into call_history, and
+# serves files under url_prefix for the ops UI's playback.
+recording:
+  source_dir: "/var/lib/freeswitch/recordings/voiceai-hotline"
+  archive_dir: "/var/lib/callbot/recordings"
+  url_prefix: "/recordings"
+  file_ext: ".mp3"
+
 # OpenTelemetry tracing. Disabled when endpoint is empty.
 # Standard OTEL_* env vars override these values at runtime.
 telemetry:

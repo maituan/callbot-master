@@ -23,8 +23,28 @@ type Config struct {
 	BargeIn     BargeInConfig     `yaml:"barge_in"`
 	Filler      FillerConfig      `yaml:"filler"`
 	Postgres    PostgresConfig    `yaml:"postgres"`
+	Recording   RecordingConfig   `yaml:"recording"`
 	Telemetry   TelemetryConfig   `yaml:"telemetry"`
 	Log         LogConfig         `yaml:"log"`
+}
+
+// RecordingConfig wires the FS-side stereo recording (MP3 written by the
+// dialplan into SourceDir) to a persistent archive served over HTTP.
+//
+// Flow per call:
+//
+//   1. SIP team's dialplan writes <SourceDir>/<call_id>.mp3 (or .wav)
+//   2. After hangup, master copies it to <ArchiveDir>/YYYY/MM/DD/<id>.mp3
+//   3. call_history.recording_url is set to URLPrefix + relative path
+//   4. The same archive path is mounted under URLPrefix by the HTTP server
+//      so an operator UI can play the file directly.
+//
+// Disable archiving by leaving SourceDir or ArchiveDir empty.
+type RecordingConfig struct {
+	SourceDir   string `yaml:"source_dir"`   // FS recordings dir, e.g. /var/lib/freeswitch/recordings/voiceai-hotline
+	ArchiveDir  string `yaml:"archive_dir"`  // Persistent archive, e.g. /var/lib/callbot/recordings
+	URLPrefix   string `yaml:"url_prefix"`   // HTTP prefix served by master, e.g. /recordings
+	FileExt     string `yaml:"file_ext"`     // ".mp3" (default) or ".wav"
 }
 
 type ServerConfig struct {
@@ -223,6 +243,12 @@ func defaults() *Config {
 		},
 		BargeIn:   BargeInConfig{Enabled: false, MinWords: 3},
 		Filler:    FillerConfig{Enabled: false},
+		Recording: RecordingConfig{
+			SourceDir:  "/var/lib/freeswitch/recordings/voiceai-hotline",
+			ArchiveDir: "/var/lib/callbot/recordings",
+			URLPrefix:  "/recordings",
+			FileExt:    ".mp3",
+		},
 		Telemetry: TelemetryConfig{ServiceName: "callbot-master", Insecure: true},
 		Log:       LogConfig{Level: "info", Format: "json"},
 	}
@@ -264,6 +290,10 @@ func applyEnvOverrides(c *Config) {
 		envStr("MASTER_OTEL_SERVICE_NAME", &c.Telemetry.ServiceName)
 	}
 	envBool("MASTER_OTEL_INSECURE", &c.Telemetry.Insecure)
+	envStr("MASTER_RECORDING_SOURCE_DIR", &c.Recording.SourceDir)
+	envStr("MASTER_RECORDING_ARCHIVE_DIR", &c.Recording.ArchiveDir)
+	envStr("MASTER_RECORDING_URL_PREFIX", &c.Recording.URLPrefix)
+	envStr("MASTER_RECORDING_FILE_EXT", &c.Recording.FileExt)
 }
 
 func envStr(key string, dst *string) {

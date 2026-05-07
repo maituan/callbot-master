@@ -4,6 +4,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -43,6 +44,19 @@ func (r *Router) Handler() http.Handler { return r.mux }
 // Mux exposes the underlying mux so feature packages (campaigns, calls)
 // can register their own routes without going through Router.
 func (r *Router) Mux() *http.ServeMux { return r.mux }
+
+// MountStaticDir serves files from dir under prefix. Used for the
+// archived call recordings ("/recordings/...") so the ops UI can play
+// them back. No auth — same trust model as /metrics.
+func (r *Router) MountStaticDir(prefix, dir string) {
+	if prefix == "" || dir == "" {
+		return
+	}
+	if !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+	r.mux.Handle(prefix, http.StripPrefix(prefix, http.FileServer(http.Dir(dir))))
+}
 
 func (r *Router) health(w http.ResponseWriter, _ *http.Request) {
 	body := map[string]any{

@@ -72,25 +72,38 @@ func (p *Postgres) Insert(ctx context.Context, r *CallRecord) error {
 INSERT INTO call_history (
     call_id, direction, scenario, phone,
     lead_id, gender, name, plate,
-    start_time, end_time, status, action, history, error_message
+    start_time, end_time, status, action, history, error_message, recording_url
 ) VALUES (
     $1, $2, $3, $4,
     $5, $6, $7, $8,
-    $9, $10, $11, $12, $13, $14
+    $9, $10, $11, $12, $13, $14, $15
 )
 ON CONFLICT (call_id) DO UPDATE SET
     end_time      = EXCLUDED.end_time,
     status        = EXCLUDED.status,
     action        = EXCLUDED.action,
     history       = EXCLUDED.history,
-    error_message = EXCLUDED.error_message;
+    error_message = EXCLUDED.error_message,
+    -- Don't blank an existing recording_url with NULL on UPSERT — the
+    -- archiver writes it AFTER the initial Insert, in a separate UPDATE.
+    recording_url = COALESCE(EXCLUDED.recording_url, call_history.recording_url);
 `
 	_, err = p.pool.Exec(ctx, q,
 		r.CallID, r.Direction, r.Scenario, r.Phone,
 		nullStr(r.LeadID), nullStr(r.Gender), nullStr(r.Name), nullStr(r.Plate),
 		r.StartTime, r.EndTime, r.Status, nullStr(r.Action),
-		historyJSON, nullStr(r.ErrorMessage),
+		historyJSON, nullStr(r.ErrorMessage), nullStr(r.RecordingURL),
 	)
+	return err
+}
+
+// SetRecordingURL is the post-archive hook the recording archiver calls
+// once the MP3 has been copied to the persistent dir. Separate from
+// Insert because the archive runs asynchronously after end-of-call.
+func (p *Postgres) SetRecordingURL(ctx context.Context, callID, url string) error {
+	_, err := p.pool.Exec(ctx,
+		`UPDATE call_history SET recording_url = $1 WHERE call_id = $2`,
+		url, callID)
 	return err
 }
 
@@ -102,7 +115,7 @@ SELECT call_id, direction, scenario, phone,
        COALESCE(lead_id,''), COALESCE(gender,''), COALESCE(name,''), COALESCE(plate,''),
        start_time, end_time, duration_sec,
        status, COALESCE(action,''),
-       history, COALESCE(error_message,''), created_at
+       history, COALESCE(error_message,''), COALESCE(recording_url,''), created_at
 FROM call_history
 WHERE call_id = $1
 `
@@ -157,7 +170,7 @@ SELECT call_id, direction, scenario, phone,
        COALESCE(lead_id,''), COALESCE(gender,''), COALESCE(name,''), COALESCE(plate,''),
        start_time, end_time, duration_sec,
        status, COALESCE(action,''),
-       history, COALESCE(error_message,''), created_at
+       history, COALESCE(error_message,''), COALESCE(recording_url,''), created_at
 FROM call_history
 `)
 	if len(conds) > 0 {
@@ -196,7 +209,7 @@ func scanRow(row scannable) (*CallRecord, error) {
 		&r.LeadID, &r.Gender, &r.Name, &r.Plate,
 		&r.StartTime, &r.EndTime, &r.DurationSec,
 		&r.Status, &r.Action,
-		&historyJSON, &r.ErrorMessage, &r.CreatedAt,
+		&historyJSON, &r.ErrorMessage, &r.RecordingURL, &r.CreatedAt,
 	); err != nil {
 		return nil, err
 	}
