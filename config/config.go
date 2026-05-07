@@ -218,6 +218,8 @@ func applyEnvOverrides(c *Config) {
 	envStr("MASTER_TTS_TOKEN", &c.TTS.Token)
 	envStr("MASTER_TTS_VOICE_ID", &c.TTS.VoiceID)
 	envStr("MASTER_BOT_URL", &c.Bot.URL)
+	envDur("MASTER_BOT_FIRST_BYTE_TIMEOUT", &c.Bot.FirstByteTimeout)
+	envDur("MASTER_BOT_TOTAL_TIMEOUT", &c.Bot.TotalTimeout)
 	envStr("MASTER_PG_DSN", &c.Postgres.DSN)
 	envStr("MASTER_LOG_LEVEL", &c.Log.Level)
 	envStr("MASTER_LOG_FORMAT", &c.Log.Format)
@@ -242,6 +244,16 @@ func applyEnvOverrides(c *Config) {
 func envStr(key string, dst *string) {
 	if v := os.Getenv(key); v != "" {
 		*dst = v
+	}
+}
+
+func envDur(key string, dst *time.Duration) {
+	v := os.Getenv(key)
+	if v == "" {
+		return
+	}
+	if d, err := time.ParseDuration(v); err == nil {
+		*dst = d
 	}
 }
 
