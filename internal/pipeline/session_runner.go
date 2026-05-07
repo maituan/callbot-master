@@ -176,15 +176,20 @@ func (r *SessionRunner) Run(parent context.Context, opts RunOpts) (retErr error)
 		}
 	}()
 
-	if err := r.ESL.PlayAudio(opts.UUID, ttsPath); err != nil {
-		return fmt.Errorf("play audio: %w", err)
-	}
-
+	// Open the TTS sink BEFORE issuing uuid_broadcast. FreeSWITCH's
+	// playback module opens the FIFO read-side with O_NONBLOCK; if we
+	// haven't attached a writer yet it sees EOF and immediately ends the
+	// playback (and tears down the recording bug as a side-effect). Our
+	// O_RDWR open keeps a writer refcount so FS always sees a peer.
 	sink, err := audio.NewFIFOSink(opts.UUID, ttsPath)
 	if err != nil {
 		return fmt.Errorf("fifo sink: %w", err)
 	}
 	defer sink.Close()
+
+	if err := r.ESL.PlayAudio(opts.UUID, ttsPath); err != nil {
+		return fmt.Errorf("play audio: %w", err)
+	}
 	addEventMs(span, "audio_path_established", ms(opts.StartedAt))
 	logger.Info("audio path established",
 		"setup_ms", ms(opts.StartedAt),
