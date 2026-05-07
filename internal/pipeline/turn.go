@@ -35,6 +35,12 @@ import (
 type AudioSource = audio.Source
 type AudioSink = audio.Sink
 
+// PlaybackOpener creates the per-utterance audio sink. SessionRunner
+// implements this by issuing mkfifo + uuid_broadcast + open(O_WRONLY)
+// and returning a handle whose Close() removes the FIFO file. Speak
+// calls it once per call.
+type PlaybackOpener func(ctx context.Context) (io.WriteCloser, error)
+
 // Config carries per-turn knobs that aren't already on the provider opts.
 //
 // ASR timeouts (SilenceTimeout / SpeechTimeout / SpeechMax) are forwarded
@@ -99,6 +105,17 @@ type Pipeline struct {
 	// entirely (the transcript is already in hand).
 	pendingTranscript string
 
+	// PlaybackOpen produces a fresh sink per utterance: SessionRunner
+	// wires this to mkfifo + uuid_broadcast + open, with cleanup on
+	// Close(). Speak invokes it once per call so every turn gets its own
+	// FIFO file. Required for live FS calls; offline/tests pass a sink
+	// directly via the SinkOverride below.
+	PlaybackOpen PlaybackOpener
+
+	// SinkOverride bypasses PlaybackOpen — used by offline-cli + tests
+	// where the sink is just an in-memory buffer or file.
+	SinkOverride AudioSink
+
 	// Per-turn outputs of the most recent Speak — read by RunTurn to build
 	// TurnRecord entries for the persistent call history.
 	lastBotText  string
@@ -137,6 +154,30 @@ type bargeESL interface {
 
 func New(uuid string, cfg Config, a asr.Client, t tts.Client, b bot.Client, v vad.Detector) *Pipeline {
 	return &Pipeline{UUID: uuid, Cfg: cfg, ASR: a, TTS: t, Bot: b, VAD: v}
+}
+
+// resolveSink picks the writer for one Speak call. Priority order:
+//   1. SinkOverride (offline-cli / tests)
+//   2. Explicit sinkArg if non-nil (legacy callers / tests)
+//   3. PlaybackOpen factory (live FS path)
+//
+// The second return is the closer to invoke at end of Speak. nil means
+// "no per-utterance teardown needed" (the caller owns sink lifetime).
+func (p *Pipeline) resolveSink(ctx context.Context, sinkArg AudioSink) (AudioSink, io.Closer, error) {
+	if p.SinkOverride != nil {
+		return p.SinkOverride, nil, nil
+	}
+	if sinkArg != nil {
+		return sinkArg, nil, nil
+	}
+	if p.PlaybackOpen == nil {
+		return nil, nil, errors.New("no sink: PlaybackOpen and SinkOverride both nil")
+	}
+	wc, err := p.PlaybackOpen(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	return wc, wc, nil
 }
 
 // frameBytes returns the per-frame byte size implied by Config (S16LE).
@@ -315,8 +356,19 @@ drainLoop:
 // canceled, FS playback is broken, and Speak returns ActionChat early.
 // The captured transcript is stashed in p.pendingTranscript for RunTurn
 // to feed into the next Speak directly (no follow-up Listen needed).
-func (p *Pipeline) Speak(ctx context.Context, src AudioSource, sink AudioSink, message string) (bot.Action, error) {
+func (p *Pipeline) Speak(ctx context.Context, src AudioSource, sinkArg AudioSink, message string) (bot.Action, error) {
 	startedAt := time.Now()
+
+	// Resolve the per-utterance sink. Live FS path: open via PlaybackOpen
+	// (mkfifo + uuid_broadcast + O_WRONLY). Offline/tests: use SinkOverride
+	// or the explicit sinkArg.
+	sink, sinkCloser, err := p.resolveSink(ctx, sinkArg)
+	if err != nil {
+		return "", fmt.Errorf("playback open: %w", err)
+	}
+	if sinkCloser != nil {
+		defer sinkCloser.Close()
+	}
 
 	// bot.turn covers the LLM call (request → action). Lifetime extends past
 	// the sentence pump because Action() blocks until the HTTP stream closes.

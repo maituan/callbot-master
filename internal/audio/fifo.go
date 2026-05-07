@@ -45,25 +45,29 @@ func OpenFIFOForRead(path string) (*os.File, error) {
 	return f, nil
 }
 
-// OpenFIFOForWrite opens a FIFO using the same O_RDWR kernel idiom we use
-// on the read side: avoids the open-time deadlock that O_WRONLY would
-// trigger when no reader is attached yet.
+// OpenFIFOForWrite opens a FIFO O_WRONLY. This BLOCKS until a reader
+// attaches — the caller is expected to issue uuid_broadcast (which makes
+// FS open the read side) BEFORE calling this so the open completes.
 //
-// Why not plain O_WRONLY: with O_WRONLY the open blocks until a reader
-// opens the FIFO. If we issued uuid_broadcast first then opened O_WRONLY,
-// FreeSWITCH's playback module — which opens the FIFO with O_NONBLOCK on
-// the read side — sees zero bytes and immediately ends the playback (and
-// in the process tears down the recording bug attached to the same
-// channel). Opening O_RDWR ourselves keeps a refcount on the FIFO so
-// FS's read side always has a writer present, and we can issue
-// uuid_broadcast AFTER the open completes.
+// We deliberately do NOT use the O_RDWR keep-writer-alive trick: keeping
+// a writer ref means FS's read side never sees EOF, so its playback
+// module blocks on every read once our buffered audio is consumed and
+// the caller hears intermittent silence whenever TTS production has a
+// tiny gap. The v1 reference design uses one FRESH FIFO per utterance:
+// open O_WRONLY, write all audio, close → FS sees EOF → playback ends
+// cleanly. Subsequent Speak() calls create a new FIFO + new broadcast.
 //
-// We never read from the returned handle — the RDWR flag is purely for
-// the kernel's writer-presence check.
+// The open is paired with a uuid_broadcast on the master side. Order:
+//
+//   1. mkfifo path
+//   2. uuid_broadcast path        ← FS opens path O_RDONLY (queues)
+//   3. OpenFIFOForWrite(path)     ← unblocks once FS attaches
+//   4. write audio
+//   5. Close()                    ← FS reads EOF after buffer drains
 func OpenFIFOForWrite(path string) (*os.File, error) {
-	f, err := os.OpenFile(path, os.O_RDWR, 0666)
+	f, err := os.OpenFile(path, os.O_WRONLY, 0666)
 	if err != nil {
-		return nil, fmt.Errorf("open fifo rdwr-write %s: %w", path, err)
+		return nil, fmt.Errorf("open fifo wronly %s: %w", path, err)
 	}
 	return f, nil
 }

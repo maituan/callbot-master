@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -43,6 +46,77 @@ type SessionRunner struct {
 	BargeMinWords int                 // word threshold; 0 → use Pipeline default (3)
 	Metrics       *metrics.Collectors // nil-safe
 	Store        CallStore           // nil-safe — when set, every call is persisted at end of Run
+}
+
+// makePlaybackOpener returns a closure that produces a fresh per-utterance
+// audio sink. Invoked once per Speak via Pipeline.PlaybackOpen.
+//
+// Lifecycle of one utterance:
+//   1. mkfifo /<TTSDir>/<uuid>-<N>.raw      (unique name per utterance)
+//   2. uuid_broadcast <uuid> <path>         (FS opens read side, queues read)
+//   3. open <path> O_WRONLY                  (blocks until FS attaches)
+//   4. master writes audio frames
+//   5. closer.Close() closes the fd → FS reads EOF, ends playback,
+//      and the FIFO file is os.Remove()'d.
+func (r *SessionRunner) makePlaybackOpener(uuid string, logger *slog.Logger) PlaybackOpener {
+	var counter int64
+	return func(ctx context.Context) (io.WriteCloser, error) {
+		n := atomic.AddInt64(&counter, 1)
+		path := filepath.Join(r.TTSDir, fmt.Sprintf("%s-%d.raw", uuid, n))
+		if err := audio.MakeFIFO(path); err != nil {
+			return nil, fmt.Errorf("mkfifo %s: %w", path, err)
+		}
+		// uuid_broadcast must happen BEFORE OpenFIFOForWrite so FS attaches
+		// the read side and the open(O_WRONLY) unblocks.
+		if err := r.ESL.PlayAudio(uuid, path); err != nil {
+			_ = os.Remove(path)
+			return nil, fmt.Errorf("uuid_broadcast: %w", err)
+		}
+		f, err := audio.OpenFIFOForWrite(path)
+		if err != nil {
+			_ = os.Remove(path)
+			return nil, err
+		}
+		logger.Debug("playback opened",
+			"call_uuid", uuid, "path", path, "utt", n)
+		return &playbackHandle{f: f, path: path, uuid: uuid, logger: logger}, nil
+	}
+}
+
+// playbackHandle wraps an *os.File so Close cleans up the FIFO file too.
+type playbackHandle struct {
+	f      *os.File
+	path   string
+	uuid   string
+	logger *slog.Logger
+	closed atomicBool
+}
+
+type atomicBool struct{ v int32 }
+
+func (a *atomicBool) cas(old, new bool) bool {
+	from, to := int32(0), int32(1)
+	if old {
+		from = 1
+	}
+	if !new {
+		to = 0
+	}
+	return atomic.CompareAndSwapInt32(&a.v, from, to)
+}
+
+func (h *playbackHandle) Write(p []byte) (int, error) { return h.f.Write(p) }
+
+func (h *playbackHandle) Close() error {
+	if !h.closed.cas(false, true) {
+		return nil
+	}
+	closeErr := h.f.Close()
+	if err := os.Remove(h.path); err != nil && !os.IsNotExist(err) {
+		h.logger.Debug("playback fifo cleanup failed",
+			"call_uuid", h.uuid, "path", h.path, "err", err)
+	}
+	return closeErr
 }
 
 // CallStore is the minimal slice of store.Postgres SessionRunner needs.
@@ -146,21 +220,16 @@ func (r *SessionRunner) Run(parent context.Context, opts RunOpts) (retErr error)
 	}
 
 	recordPath := filepath.Join(r.RecordingDir, opts.UUID+".raw")
-	ttsPath := filepath.Join(r.TTSDir, opts.UUID+".raw")
 	if err := audio.EnsureDir(recordPath); err != nil {
 		return fmt.Errorf("ensure record dir: %w", err)
 	}
-	if err := audio.EnsureDir(ttsPath); err != nil {
+	if err := os.MkdirAll(r.TTSDir, 0o755); err != nil {
 		return fmt.Errorf("ensure tts dir: %w", err)
 	}
 	if err := audio.MakeFIFO(recordPath); err != nil {
 		return fmt.Errorf("mkfifo recording: %w", err)
 	}
 	defer cleanupFile(recordPath, logger)
-	if err := audio.MakeFIFO(ttsPath); err != nil {
-		return fmt.Errorf("mkfifo tts: %w", err)
-	}
-	defer cleanupFile(ttsPath, logger)
 
 	src, err := audio.NewFIFOSource(sess.Context(), opts.UUID, recordPath, r.FrameBytes)
 	if err != nil {
@@ -177,25 +246,19 @@ func (r *SessionRunner) Run(parent context.Context, opts RunOpts) (retErr error)
 		}
 	}()
 
-	// Open the TTS sink BEFORE issuing uuid_broadcast. FreeSWITCH's
-	// playback module opens the FIFO read-side with O_NONBLOCK; if we
-	// haven't attached a writer yet it sees EOF and immediately ends the
-	// playback (and tears down the recording bug as a side-effect). Our
-	// O_RDWR open keeps a writer refcount so FS always sees a peer.
-	sink, err := audio.NewFIFOSink(opts.UUID, ttsPath)
-	if err != nil {
-		return fmt.Errorf("fifo sink: %w", err)
-	}
-	defer sink.Close()
-
-	if err := r.ESL.PlayAudio(opts.UUID, ttsPath); err != nil {
-		return fmt.Errorf("play audio: %w", err)
-	}
+	// TTS playback uses a FRESH FIFO per utterance — see PlaybackOpener.
+	// The session-level setup keeps only the recording FIFO; each Speak
+	// builds its own audio sink via Pipeline.PlaybackOpen, signals EOF
+	// when done, and removes the file. This matches the v1 model and
+	// prevents FS's playback from blocking on an empty long-lived FIFO
+	// (the reason the caller heard "...em có thể hỗ <silence> trợ gì..."
+	// before this refactor).
+	playbackOpen := r.makePlaybackOpener(opts.UUID, logger)
 	addEventMs(span, "audio_path_established", ms(opts.StartedAt))
 	logger.Info("audio path established",
 		"setup_ms", ms(opts.StartedAt),
 		"record_fifo", recordPath,
-		"tts_fifo", ttsPath)
+		"tts_dir", r.TTSDir)
 
 	pCfg := r.PipelineCfg
 	if pCfg.SampleRate == 0 {
@@ -211,6 +274,7 @@ func (r *SessionRunner) Run(parent context.Context, opts RunOpts) (retErr error)
 	p.BargeIn = r.BargeIn
 	p.BargeMinWords = r.BargeMinWords
 	p.ESL = r.ESL // satisfies bargeESL interface
+	p.PlaybackOpen = playbackOpen
 
 	// Greeting turn (empty user message → bot decides based on history).
 	// We pass src so Speak can drain the recording FIFO during the 5+ s
@@ -225,7 +289,8 @@ func (r *SessionRunner) Run(parent context.Context, opts RunOpts) (retErr error)
 			attribute.String(attrCallUUID, opts.UUID),
 		),
 	)
-	cont, err := p.RunGreeting(greetCtx, src, sink)
+	// sink=nil → Pipeline.PlaybackOpen creates a fresh per-utterance FIFO.
+	cont, err := p.RunGreeting(greetCtx, src, nil)
 	greetSpan.End()
 	if r.Metrics != nil {
 		r.Metrics.TurnDuration.WithLabelValues("greeting", opts.Scenario).
@@ -260,7 +325,7 @@ func (r *SessionRunner) Run(parent context.Context, opts RunOpts) (retErr error)
 			),
 		)
 		var turnErr error
-		cont, turnErr = p.RunTurn(turnCtx, src, sink)
+		cont, turnErr = p.RunTurn(turnCtx, src, nil)
 		turnSpan.End()
 		if r.Metrics != nil {
 			r.Metrics.TurnDuration.WithLabelValues("turn", opts.Scenario).
