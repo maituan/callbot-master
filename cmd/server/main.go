@@ -275,6 +275,8 @@ func main() {
 
 	if pgStore != nil {
 		api.RegisterBots(router.Mux(), api.BotsDeps{Store: pgStore})
+		api.RegisterTenants(router.Mux(), api.TenantsDeps{Store: pgStore})
+		api.RegisterUsers(router.Mux(), api.UsersDeps{Store: pgStore})
 	} else {
 		api.RegisterBots(router.Mux(), api.BotsDeps{}) // 503 stubs
 	}

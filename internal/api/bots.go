@@ -37,65 +37,23 @@ type BotStore interface {
 	ListDIDs(ctx context.Context, botID uuid.UUID) ([]store.DIDRecord, error)
 }
 
-// RegisterBots mounts /api/v1/bots, /api/v1/bots/{id}, /api/v1/bots/{id}/dids,
-// /api/v1/dids/{did} (DELETE), and /api/v1/tenants on the given mux.
+// RegisterBots mounts /api/v1/bots and /api/v1/bots/{id}* on the given mux.
+// Tenant routes live in tenants.go (separate handler, full CRUD).
 func RegisterBots(mux *http.ServeMux, d BotsDeps) {
 	if d.Store == nil {
 		mux.HandleFunc("/api/v1/bots", botsDisabled)
 		mux.HandleFunc("/api/v1/bots/", botsDisabled)
-		mux.HandleFunc("/api/v1/tenants", botsDisabled)
 		return
 	}
 	h := &botsHandler{d: d}
 	mux.HandleFunc("/api/v1/bots", h.collection)
 	mux.HandleFunc("/api/v1/bots/", h.item)
-	mux.HandleFunc("/api/v1/tenants", h.tenants)
 }
 
 type botsHandler struct{ d BotsDeps }
 
 func botsDisabled(w http.ResponseWriter, _ *http.Request) {
 	writeJSONError(w, http.StatusServiceUnavailable, "bot store not configured")
-}
-
-// ── Tenants (read-only) ───────────────────────────────────────────────
-
-func (h *botsHandler) tenants(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	id := auth.FromContext(r.Context())
-	if id == nil {
-		writeJSONError(w, http.StatusUnauthorized, "not authenticated")
-		return
-	}
-	ts, err := h.d.Store.ListTenants(r.Context())
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "list tenants: "+err.Error())
-		return
-	}
-	// tenant_user only sees its own tenant — the dropdown should never
-	// surface other orgs.
-	if !id.IsPlatformAdmin() {
-		filtered := make([]*store.Tenant, 0, 1)
-		for _, t := range ts {
-			if id.TenantID != nil && t.ID == *id.TenantID {
-				filtered = append(filtered, t)
-			}
-		}
-		ts = filtered
-	}
-	out := make([]map[string]any, 0, len(ts))
-	for _, t := range ts {
-		out = append(out, map[string]any{
-			"id":      t.ID,
-			"slug":    t.Slug,
-			"name":    t.Name,
-			"enabled": t.Enabled,
-		})
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"tenants": out})
 }
 
 // ── Bots ──────────────────────────────────────────────────────────────

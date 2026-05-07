@@ -106,6 +106,87 @@ func (p *Postgres) MarkLogin(ctx context.Context, userID uuid.UUID) {
 		`UPDATE users SET last_login_at = now() WHERE id = $1`, userID)
 }
 
+// ListUsers returns users in scope. tenantID nil = every user (admin).
+// platform_admin rows always come back regardless of scope so an admin
+// looking at another tenant's view still sees themselves.
+func (p *Postgres) ListUsers(ctx context.Context, tenantID *uuid.UUID) ([]*User, error) {
+	q := `
+SELECT id, username, password_hash, role, tenant_id, enabled,
+       last_login_at, created_at, updated_at
+FROM users`
+	args := []any{}
+	if tenantID != nil {
+		q += " WHERE tenant_id = $1 OR role = 'platform_admin'"
+		args = append(args, *tenantID)
+	}
+	q += " ORDER BY role, username"
+	rows, err := p.pool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*User
+	for rows.Next() {
+		u, err := scanUser(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
+// UpdateUserEnabled toggles the enabled flag. Disabled users keep
+// existing JWTs valid until expiry — clients have to log out + back in.
+// In practice that's fine for our 12h TTL.
+func (p *Postgres) UpdateUserEnabled(ctx context.Context, id uuid.UUID, enabled bool) error {
+	tag, err := p.pool.Exec(ctx,
+		`UPDATE users SET enabled = $1 WHERE id = $2`, enabled, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// DeleteUser hard-deletes a user. Refuses if the user is the only
+// platform_admin (we'd lock ourselves out).
+func (p *Postgres) DeleteUser(ctx context.Context, id uuid.UUID) error {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var role string
+	if err := tx.QueryRow(ctx, `SELECT role FROM users WHERE id = $1`, id).Scan(&role); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		return err
+	}
+	if role == RolePlatformAdmin {
+		var n int
+		if err := tx.QueryRow(ctx,
+			`SELECT count(*) FROM users WHERE role = 'platform_admin'`).Scan(&n); err != nil {
+			return err
+		}
+		if n <= 1 {
+			return ErrLastAdmin
+		}
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM users WHERE id = $1`, id); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// ErrLastAdmin is returned when an operation would leave the system
+// with no platform_admin (lockout protection).
+var ErrLastAdmin = errors.New("cannot delete or demote the last platform admin")
+
 func scanUser(row scannable) (*User, error) {
 	var u User
 	if err := row.Scan(

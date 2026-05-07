@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -56,6 +57,65 @@ func (p *Postgres) ListTenants(ctx context.Context) ([]*Tenant, error) {
 		out = append(out, t)
 	}
 	return out, rows.Err()
+}
+
+// CreateTenant inserts a new tenant. Returns ErrSlugTaken if the slug
+// is already in use (UNIQUE constraint).
+func (p *Postgres) CreateTenant(ctx context.Context, slug, name string) (uuid.UUID, error) {
+	var id uuid.UUID
+	err := p.pool.QueryRow(ctx,
+		`INSERT INTO tenants (slug, name) VALUES ($1, $2) RETURNING id`,
+		slug, name).Scan(&id)
+	if err != nil && isUniqueViolation(err) {
+		return uuid.Nil, ErrSlugTaken
+	}
+	return id, err
+}
+
+// UpdateTenant changes the name + enabled flag. Slug is immutable
+// because it's referenced from bots.tenant_id and changing it would
+// invalidate all bookmarks/links to it.
+func (p *Postgres) UpdateTenant(ctx context.Context, id uuid.UUID, name string, enabled bool) error {
+	tag, err := p.pool.Exec(ctx,
+		`UPDATE tenants SET name = $1, enabled = $2 WHERE id = $3`,
+		name, enabled, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// DeleteTenant hard-deletes a tenant. The bots+users FK is RESTRICT, so
+// this errors out if anything still references it — the API layer
+// translates that to a 409 with a "remove dependents first" hint.
+func (p *Postgres) DeleteTenant(ctx context.Context, id uuid.UUID) error {
+	tag, err := p.pool.Exec(ctx, `DELETE FROM tenants WHERE id = $1`, id)
+	if err != nil {
+		if isFKViolation(err) {
+			return ErrTenantHasDependents
+		}
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// ErrSlugTaken / ErrNotFound / ErrTenantHasDependents are sentinels the
+// API uses to map DB errors to HTTP status codes.
+var (
+	ErrSlugTaken          = errors.New("slug already in use")
+	ErrNotFound           = errors.New("not found")
+	ErrTenantHasDependents = errors.New("tenant still has bots or users")
+)
+
+// isFKViolation matches Postgres SQLSTATE 23503 (foreign_key_violation).
+func isFKViolation(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "23503")
 }
 
 // UpsertTenant is used by the bootstrap path to ensure the seed tenant
