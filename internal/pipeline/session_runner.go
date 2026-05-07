@@ -8,9 +8,11 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/fiorix/go-eventsocket/eventsocket"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -46,6 +48,42 @@ type SessionRunner struct {
 	BargeMinWords int                 // word threshold; 0 → use Pipeline default (3)
 	Metrics       *metrics.Collectors // nil-safe
 	Store        CallStore           // nil-safe — when set, every call is persisted at end of Run
+
+	// playbackStops maps a call uuid to the ACTIVE utterance's done-channel.
+	// makePlaybackOpener stores a fresh chan per utterance; the global
+	// PLAYBACK_STOP handler closes whatever is currently parked here so
+	// Speak unblocks the moment FS finishes draining its internal jitter
+	// buffer (audio-bytes/16 sleep alone overshoots by ~1 s).
+	playbackStops sync.Map // uuid → chan struct{}
+	registerOnce  sync.Once
+}
+
+// RegisterESLHandlers wires the PLAYBACK_STOP listener that drives Speak's
+// post-audio drain. Idempotent — safe to call multiple times.
+func (r *SessionRunner) RegisterESLHandlers() {
+	r.registerOnce.Do(func() {
+		r.ESL.RegisterHandler("PLAYBACK_STOP", r.onPlaybackStop)
+	})
+}
+
+func (r *SessionRunner) onPlaybackStop(ev *eventsocket.Event) {
+	uuid := ev.Get("Unique-Id")
+	if uuid == "" {
+		return
+	}
+	v, ok := r.playbackStops.LoadAndDelete(uuid)
+	if !ok {
+		return
+	}
+	if ch, ok := v.(chan struct{}); ok {
+		// guarded close — handler may fire after our own Close()
+		select {
+		case <-ch:
+			// already closed
+		default:
+			close(ch)
+		}
+	}
 }
 
 // makePlaybackOpener returns a closure that produces a fresh per-utterance
@@ -66,31 +104,58 @@ func (r *SessionRunner) makePlaybackOpener(uuid string, logger *slog.Logger) Pla
 		if err := audio.MakeFIFO(path); err != nil {
 			return nil, fmt.Errorf("mkfifo %s: %w", path, err)
 		}
+
+		// Pre-arm the PLAYBACK_STOP signal BEFORE issuing uuid_broadcast.
+		// FS only emits one PLAYBACK_STOP per uuid_broadcast — racing the
+		// register would be brittle. The handler LoadAndDeletes the chan,
+		// so any prior leftover from a previous utterance is cleared.
+		stopCh := make(chan struct{})
+		r.playbackStops.Store(uuid, stopCh)
+
 		// uuid_broadcast must happen BEFORE OpenFIFOForWrite so FS attaches
 		// the read side and the open(O_WRONLY) unblocks.
 		if err := r.ESL.PlayAudio(uuid, path); err != nil {
+			r.playbackStops.Delete(uuid)
 			_ = os.Remove(path)
 			return nil, fmt.Errorf("uuid_broadcast: %w", err)
 		}
 		f, err := audio.OpenFIFOForWrite(path)
 		if err != nil {
+			r.playbackStops.Delete(uuid)
 			_ = os.Remove(path)
 			return nil, err
 		}
 		logger.Debug("playback opened",
 			"call_uuid", uuid, "path", path, "utt", n)
-		return &playbackHandle{f: f, path: path, uuid: uuid, logger: logger}, nil
+		return &playbackHandle{
+			f:      f,
+			path:   path,
+			uuid:   uuid,
+			logger: logger,
+			done:   stopCh,
+			runner: r,
+		}, nil
 	}
 }
 
 // playbackHandle wraps an *os.File so Close cleans up the FIFO file too.
+// Done() returns a channel closed by the global PLAYBACK_STOP handler when
+// FreeSWITCH actually finishes playing this utterance (not when we finish
+// writing — those moments are ~1 s apart due to the kernel pipe buffer +
+// FS's internal jitter buffer).
 type playbackHandle struct {
 	f      *os.File
 	path   string
 	uuid   string
 	logger *slog.Logger
+	done   chan struct{}
+	runner *SessionRunner
 	closed atomicBool
 }
+
+// Done returns the playback-complete signal; reading from a closed chan
+// is non-blocking, so callers can use it in a select with a timeout.
+func (h *playbackHandle) Done() <-chan struct{} { return h.done }
 
 type atomicBool struct{ v int32 }
 
@@ -112,6 +177,12 @@ func (h *playbackHandle) Close() error {
 		return nil
 	}
 	closeErr := h.f.Close()
+	// If PLAYBACK_STOP hasn't fired yet (rare), evict the entry so we
+	// don't leak the chan. The handler also LoadAndDeletes, so this is
+	// just defensive.
+	if h.runner != nil {
+		h.runner.playbackStops.Delete(h.uuid)
+	}
 	if err := os.Remove(h.path); err != nil && !os.IsNotExist(err) {
 		h.logger.Debug("playback fifo cleanup failed",
 			"call_uuid", h.uuid, "path", h.path, "err", err)

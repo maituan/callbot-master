@@ -253,6 +253,7 @@ func (p *Pipeline) Listen(ctx context.Context, src AudioSource) (string, error) 
 
 	final := ""
 	srcDrained := false
+	gotFinal := false
 
 readLoop:
 	for {
@@ -300,30 +301,37 @@ readLoop:
 				}
 			}
 			if res.IsFinal {
+				gotFinal = true
 				break readLoop
 			}
 		}
 	}
 
-	// Drain any remaining results post-CloseSend so we capture the final
-	// transcript the server flushes.
-	drainCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-drainLoop:
-	for {
-		select {
-		case res, ok := <-stream.Recv():
-			if !ok {
+	// drainLoop only runs if we DIDN'T already get IsFinal in readLoop —
+	// e.g., we exited because src EOF'd or VAD/timeout fired and we
+	// CloseSend'd, in which case the server still owes us a final
+	// transcript. Once IsFinal arrives in readLoop the server has
+	// nothing more to say, so spinning here only adds latency
+	// (previously cost up to 2 s per turn).
+	if !gotFinal {
+		drainCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+	drainLoop:
+		for {
+			select {
+			case res, ok := <-stream.Recv():
+				if !ok {
+					break drainLoop
+				}
+				if res.Text != "" {
+					final = res.Text
+				}
+				if res.IsFinal {
+					break drainLoop
+				}
+			case <-drainCtx.Done():
 				break drainLoop
 			}
-			if res.Text != "" {
-				final = res.Text
-			}
-			if res.IsFinal {
-				break drainLoop
-			}
-		case <-drainCtx.Done():
-			break drainLoop
 		}
 	}
 
@@ -598,26 +606,35 @@ func (p *Pipeline) Speak(ctx context.Context, src AudioSource, sinkArg AudioSink
 	ttsSpan.SetAttributes(attribute.Int("audio.bytes", bytesOut))
 	recordStage(p.Metrics, "tts.total", p.Scenario, time.Since(startedAt).Seconds())
 
-	// TTS streams audio faster than realtime — for a 5s greeting we
-	// often finish writing in <200ms and Speak would return immediately,
-	// while FS keeps draining the FIFO at 16 kB/s (8 kHz × 2 bytes). If
-	// we let the next Listen open right away, ASR captures the bot's own
-	// voice echoing back through the handset and (a) finalizes empty
-	// transcripts that re-trigger the bot's greeting fallback, or (b)
-	// trips barge-in on the bot itself. Block here until the buffered
-	// audio has actually been played out at the caller's ear.
+	// Wait for FS to actually finish playing the audio before returning.
+	// FreeSWITCH only emits PLAYBACK_STOP once the kernel pipe buffer +
+	// its own jitter buffer have fully drained — this is a more accurate
+	// signal than computing audio_bytes/16 ms (which overshoots by ~1 s
+	// because of those buffers).
 	//
-	// Skipped on barge-in (the playback was already broken by uuid_break)
-	// and when no audio was produced (greeting failures, ENDCALL with no
-	// reply text).
-	if !bargeFired && bytesOut > 0 && firstAudioAt > 0 {
-		audioDur := time.Duration(bytesOut/16) * time.Millisecond
-		audioElapsed := time.Since(startedAt) - firstAudioAt
-		if remaining := audioDur - audioElapsed; remaining > 0 {
-			ttsSpan.AddEvent("playback_drain_wait",
-				trace.WithAttributes(attribute.Int64("wait_ms", remaining.Milliseconds())))
+	// We close the sink first so FS reads EOF and finishes promptly.
+	// Skipped on barge-in (uuid_break already short-circuited playback)
+	// and when no sinkCloser was created (offline / explicit-sink path).
+	if !bargeFired && sinkCloser != nil {
+		_ = sinkCloser.Close()
+		sinkCloser = nil // already closed; defer below is a no-op
+		if h, ok := sink.(interface{ Done() <-chan struct{} }); ok {
+			waitStart := time.Now()
+			audioDur := time.Duration(bytesOut/16) * time.Millisecond
+			// Bound the wait: PLAYBACK_STOP should fire well within
+			// audioDur + 5s. Beyond that we assume the event was lost
+			// and proceed rather than block the call forever.
+			deadline := audioDur + 5*time.Second
 			select {
-			case <-time.After(remaining):
+			case <-h.Done():
+				ttsSpan.AddEvent("playback_stop_received",
+					trace.WithAttributes(
+						attribute.Int64("wait_ms", time.Since(waitStart).Milliseconds())))
+			case <-time.After(deadline):
+				slog.Warn("playback_stop wait timed out",
+					"call_uuid", p.UUID,
+					"deadline_ms", deadline.Milliseconds())
+				ttsSpan.AddEvent("playback_stop_timeout")
 			case <-ctx.Done():
 				return action, ctx.Err()
 			}

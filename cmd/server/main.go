@@ -139,6 +139,10 @@ func main() {
 		runner.Store = pgStore
 	}
 
+	// Wire PLAYBACK_STOP listener — Speak uses it to know when FS finished
+	// playing each utterance.
+	runner.RegisterESLHandlers()
+
 	inbound := pipeline.NewInboundHandler(rootCtx, pipeline.InboundDeps{
 		Runner:    runner,
 		DID:       cfg.Inbound.DID,

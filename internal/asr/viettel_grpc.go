@@ -164,9 +164,17 @@ func (s *viettelStream) recvLoop() {
 			continue
 		}
 		h := res.GetHypotheses()[0]
-		text := h.GetTranscriptNormed()
+		// Prefer raw transcript over normed: the newer relay client
+		// (callbot-realtime-agents-main/src/app/lib/asrClient.ts) uses
+		// hypothesis.transcript and our user reports the v2 path "feels
+		// slower" than that one. The normed field is a post-processing
+		// pass on top of transcript and arrives populated in the same
+		// gRPC message, but in practice we've seen the raw field be
+		// surfaced earlier in partial frames. Falling back keeps us
+		// working if the server only fills normed.
+		text := h.GetTranscript()
 		if text == "" {
-			text = h.GetTranscript()
+			text = h.GetTranscriptNormed()
 		}
 		select {
 		case s.out <- Result{Text: text, IsFinal: res.GetFinal()}:
