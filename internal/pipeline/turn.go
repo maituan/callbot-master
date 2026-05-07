@@ -542,27 +542,47 @@ func (p *Pipeline) Speak(ctx context.Context, src AudioSource, sinkArg AudioSink
 	var action bot.Action
 	var botErr error
 	bargeFired := false
-	select {
-	case ar := <-actionCh:
-		action, botErr = ar.action, ar.err
-	case <-bargeTriggerChan(monitor):
+
+	// triggerBargeIn collapses the barge-in chain (close TTS, uuid_break,
+	// cancel bot) and metric increment into one place. Returns true if
+	// this call actually fired (CompareAndSwap on bargeFired).
+	triggerBargeIn := func() {
+		if bargeFired {
+			return
+		}
 		bargeFired = true
 		botSpan.AddEvent("barge_in")
-		_ = ttsStream.Close() // stop audio synthesis
+		_ = ttsStream.Close()
 		if p.ESL != nil {
 			if err := p.ESL.StopPlayback(p.UUID); err != nil {
 				slog.Warn("uuid_break failed", "call_uuid", p.UUID, "err", err)
 			}
 		}
-		cancelBot() // abort HTTP request → Action() + sentence pump return
-		ar := <-actionCh
-		action, botErr = ar.action, ar.err
-		// On barge-in, the bot ctx was canceled by us — this isn't a real error.
-		if errors.Is(botErr, context.Canceled) {
-			botErr = nil
-		}
+		cancelBot()
 		if p.Metrics != nil {
 			p.Metrics.BargeInTotal.WithLabelValues(p.Scenario).Inc()
+		}
+	}
+
+	select {
+	case ar := <-actionCh:
+		action, botErr = ar.action, ar.err
+		// Bot HTTP stream may finish much earlier than FS audio playback
+		// (text streams in <1 s, FS plays the resulting 14 s of audio at
+		// realtime). The barge-in monitor could fire DURING the playback
+		// drain even after actionCh has fired. Check non-blocking; if
+		// the trigger already happened, run the chain now.
+		select {
+		case <-bargeTriggerChan(monitor):
+			triggerBargeIn()
+		default:
+		}
+	case <-bargeTriggerChan(monitor):
+		triggerBargeIn()
+		ar := <-actionCh
+		action, botErr = ar.action, ar.err
+		if errors.Is(botErr, context.Canceled) {
+			botErr = nil
 		}
 	}
 	// Drain the sentence pump goroutine so we don't leak it.
@@ -615,6 +635,11 @@ func (p *Pipeline) Speak(ctx context.Context, src AudioSource, sinkArg AudioSink
 	// We close the sink first so FS reads EOF and finishes promptly.
 	// Skipped on barge-in (uuid_break already short-circuited playback)
 	// and when no sinkCloser was created (offline / explicit-sink path).
+	//
+	// Important: barge-in can ALSO fire DURING this wait — bot text is
+	// done streaming but FS still has 10+ s of audio queued, and the
+	// caller might decide to interrupt mid-playback. Race the barge-in
+	// trigger against the PLAYBACK_STOP signal.
 	if !bargeFired && sinkCloser != nil {
 		_ = sinkCloser.Close()
 		sinkCloser = nil // already closed; defer below is a no-op
@@ -628,6 +653,11 @@ func (p *Pipeline) Speak(ctx context.Context, src AudioSource, sinkArg AudioSink
 			select {
 			case <-h.Done():
 				ttsSpan.AddEvent("playback_stop_received",
+					trace.WithAttributes(
+						attribute.Int64("wait_ms", time.Since(waitStart).Milliseconds())))
+			case <-bargeTriggerChan(monitor):
+				triggerBargeIn()
+				ttsSpan.AddEvent("barge_in_during_drain",
 					trace.WithAttributes(
 						attribute.Int64("wait_ms", time.Since(waitStart).Milliseconds())))
 			case <-time.After(deadline):
