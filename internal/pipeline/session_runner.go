@@ -213,6 +213,10 @@ func (r *SessionRunner) Run(parent context.Context, opts RunOpts) (retErr error)
 	p.ESL = r.ESL // satisfies bargeESL interface
 
 	// Greeting turn (empty user message → bot decides based on history).
+	// We pass src so Speak can drain the recording FIFO during the 5+ s
+	// of greeting playback. Otherwise the next Listen burst-reads the
+	// accumulated backlog (mostly bot's own echo) and ASR finalizes it
+	// as garbage, eating one whole turn.
 	greetingStart := time.Now()
 	greetCtx, greetSpan := tracer.Start(sess.Context(), "pipeline.greeting",
 		trace.WithAttributes(
@@ -221,7 +225,7 @@ func (r *SessionRunner) Run(parent context.Context, opts RunOpts) (retErr error)
 			attribute.String(attrCallUUID, opts.UUID),
 		),
 	)
-	cont, err := p.RunTurn(greetCtx, nil, sink)
+	cont, err := p.RunGreeting(greetCtx, src, sink)
 	greetSpan.End()
 	if r.Metrics != nil {
 		r.Metrics.TurnDuration.WithLabelValues("greeting", opts.Scenario).

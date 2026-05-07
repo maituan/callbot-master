@@ -629,11 +629,28 @@ func (p *Pipeline) RunTurn(ctx context.Context, src AudioSource, sink AudioSink)
 		}
 	}
 
+	return p.speakAndRecord(ctx, src, sink, transcript, turnStart)
+}
+
+// RunGreeting plays the bot's first message (no caller input) and records
+// the turn into history. The src is forwarded to Speak so the recording
+// FIFO is drained during playback — without this, Speak finishes (5+ s of
+// caller-side silence + echo accumulate in the FIFO), and the next Listen
+// reads that backlog as a burst that ASR finalizes as garbage in <3 s.
+func (p *Pipeline) RunGreeting(ctx context.Context, src AudioSource, sink AudioSink) (bool, error) {
+	turnStart := time.Now()
+	return p.speakAndRecord(ctx, src, sink, "", turnStart)
+}
+
+// speakAndRecord is the shared tail of RunTurn / RunGreeting: invoke
+// Speak, append the resulting TurnRecord, translate ENDCALL into
+// continueCall=false. Centralizing it keeps the history bookkeeping in
+// one place.
+func (p *Pipeline) speakAndRecord(ctx context.Context, src AudioSource, sink AudioSink, transcript string, turnStart time.Time) (bool, error) {
 	action, err := p.Speak(ctx, src, sink, transcript)
 	if err != nil {
 		return false, err
 	}
-
 	p.history = append(p.history, TurnRecord{
 		Index:     len(p.history),
 		UserText:  transcript,
@@ -643,7 +660,6 @@ func (p *Pipeline) RunTurn(ctx context.Context, src AudioSource, sink AudioSink)
 		EndedAt:   time.Now(),
 		BargedIn:  p.lastBargedIn,
 	})
-
 	if action == bot.ActionEndCall {
 		return false, nil
 	}

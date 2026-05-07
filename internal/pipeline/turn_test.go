@@ -143,7 +143,7 @@ func TestPipeline_Speak_EndcallActionPropagates(t *testing.T) {
 	}
 }
 
-func TestPipeline_RunTurn_GreetingPathSkipsListen(t *testing.T) {
+func TestPipeline_RunGreeting_SkipsListen(t *testing.T) {
 	var seenMsg string
 	botCli, turn := newBotMock(bot.ActionEndCall)
 	botCli.OnStream = func(_ context.Context, _, msg string) (bot.TurnStream, error) {
@@ -162,7 +162,8 @@ func TestPipeline_RunTurn_GreetingPathSkipsListen(t *testing.T) {
 	cfg := Defaults()
 	p := New("call-1", cfg, nil, ttsCli, botCli, nil)
 	var sink bytes.Buffer
-	cont, err := p.RunTurn(context.Background(), nil, &sink)
+	// RunGreeting with src=nil keeps the old "no drain, no Listen" path.
+	cont, err := p.RunGreeting(context.Background(), nil, &sink)
 	if err != nil {
 		t.Fatalf("RunTurn: %v", err)
 	}
