@@ -65,6 +65,13 @@ services:
       # Set to the UI origin (e.g. http://localhost:3001) when running the
       # ops UI on a separate port. "" disables CORS entirely.
       MASTER_CORS_ALLOW_ORIGIN: "${MASTER_CORS_ALLOW_ORIGIN:-http://localhost:3001}"
+      # Auth: JWT secret (≥32 chars) + bootstrap platform admin. Master
+      # refuses to authenticate logins until both are set.
+      MASTER_JWT_SECRET: "${MASTER_JWT_SECRET:-}"
+      MASTER_JWT_TTL: "${MASTER_JWT_TTL:-12h}"
+      MASTER_PLATFORM_ADMIN_USER: "${MASTER_PLATFORM_ADMIN_USER:-admin}"
+      MASTER_PLATFORM_ADMIN_PASSWORD: "${MASTER_PLATFORM_ADMIN_PASSWORD:-}"
+      MASTER_COOKIE_SECURE: "${MASTER_COOKIE_SECURE:-false}"
       OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
       OTEL_SERVICE_NAME: "${OTEL_SERVICE_NAME:-callbot-master}"
       MASTER_OTEL_INSECURE: "${MASTER_OTEL_INSECURE:-true}"

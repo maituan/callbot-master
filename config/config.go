@@ -26,6 +26,18 @@ type Config struct {
 	Recording   RecordingConfig   `yaml:"recording"`
 	Telemetry   TelemetryConfig   `yaml:"telemetry"`
 	Log         LogConfig         `yaml:"log"`
+	Auth        AuthConfig        `yaml:"auth"`
+}
+
+// AuthConfig holds JWT + bootstrap admin settings. The platform admin
+// is upserted on every startup from these values, so rotating the
+// password is just an env var change + restart.
+type AuthConfig struct {
+	JWTSecret             string        `yaml:"jwt_secret"`              // ≥32 chars
+	JWTTTL                time.Duration `yaml:"jwt_ttl"`                 // default 12h
+	PlatformAdminUser     string        `yaml:"platform_admin_user"`     // bootstrap admin username
+	PlatformAdminPassword string        `yaml:"platform_admin_password"` // plaintext; hashed before insert
+	CookieSecure          bool          `yaml:"cookie_secure"`           // set true behind HTTPS
 }
 
 // RecordingConfig wires the FS-side stereo recording (MP3 written by the
@@ -259,6 +271,12 @@ func defaults() *Config {
 		},
 		Telemetry: TelemetryConfig{ServiceName: "callbot-master", Insecure: true},
 		Log:       LogConfig{Level: "info", Format: "json"},
+		Auth: AuthConfig{
+			JWTTTL:            12 * time.Hour,
+			PlatformAdminUser: "admin",
+			// JWTSecret + PlatformAdminPassword have NO default — operator must set them.
+			// Master refuses to start with auth enabled if either is empty.
+		},
 	}
 }
 
@@ -303,6 +321,11 @@ func applyEnvOverrides(c *Config) {
 	envStr("MASTER_RECORDING_ARCHIVE_DIR", &c.Recording.ArchiveDir)
 	envStr("MASTER_RECORDING_URL_PREFIX", &c.Recording.URLPrefix)
 	envStr("MASTER_RECORDING_FILE_EXT", &c.Recording.FileExt)
+	envStr("MASTER_JWT_SECRET", &c.Auth.JWTSecret)
+	envDur("MASTER_JWT_TTL", &c.Auth.JWTTTL)
+	envStr("MASTER_PLATFORM_ADMIN_USER", &c.Auth.PlatformAdminUser)
+	envStr("MASTER_PLATFORM_ADMIN_PASSWORD", &c.Auth.PlatformAdminPassword)
+	envBool("MASTER_COOKIE_SECURE", &c.Auth.CookieSecure)
 }
 
 func envStr(key string, dst *string) {

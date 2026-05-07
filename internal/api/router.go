@@ -9,6 +9,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"callbot-master/internal/auth"
 	"callbot-master/internal/metrics"
 	"callbot-master/internal/session"
 )
@@ -22,6 +23,9 @@ type Router struct {
 	// every response and short-circuits OPTIONS preflights with 204.
 	// Set via SetCORS — empty means CORS disabled.
 	corsOrigin string
+	// authIssuer, if non-nil, makes the auth middleware enforce JWTs on
+	// every /api/v1/* path except /api/v1/auth/login.
+	authIssuer *auth.Issuer
 }
 
 // New wires /health and /metrics. metrics may be nil — the endpoint then
@@ -44,10 +48,14 @@ func New(mgr *session.Manager, m *metrics.Collectors) *Router {
 }
 
 func (r *Router) Handler() http.Handler {
-	if r.corsOrigin == "" {
-		return r.mux
+	var h http.Handler = r.mux
+	if r.authIssuer != nil {
+		h = authChain(r.authIssuer, r.mux)
 	}
-	return corsMiddleware(r.corsOrigin, r.mux)
+	if r.corsOrigin != "" {
+		h = corsMiddleware(r.corsOrigin, h)
+	}
+	return h
 }
 
 // SetCORS enables Access-Control-Allow-Origin on responses. Pass "" to
@@ -55,13 +63,47 @@ func (r *Router) Handler() http.Handler {
 // "http://localhost:3001". Has no effect on requests already same-origin.
 func (r *Router) SetCORS(origin string) { r.corsOrigin = origin }
 
+// SetAuth enables JWT enforcement on /api/v1/* (except /api/v1/auth/login).
+// Pass nil to leave the API open (dev / phase-out).
+func (r *Router) SetAuth(issuer *auth.Issuer) { r.authIssuer = issuer }
+
+// authChain wraps mux with the JWT middleware, but exempts public paths.
+// Public: /health, /metrics, /recordings/*, /api/v1/auth/login.
+// Everything else under /api/v1/* requires a valid token.
+func authChain(issuer *auth.Issuer, mux *http.ServeMux) http.Handler {
+	protected := auth.Middleware(issuer)(mux)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := r.URL.Path
+		// CORS preflight + public surface bypass JWT entirely.
+		if r.Method == http.MethodOptions ||
+			p == "/health" || p == "/metrics" ||
+			strings.HasPrefix(p, "/recordings/") ||
+			p == "/api/v1/auth/login" {
+			mux.ServeHTTP(w, r)
+			return
+		}
+		// Only enforce on the API surface — anything else (favicon, static)
+		// passes through too.
+		if !strings.HasPrefix(p, "/api/") {
+			mux.ServeHTTP(w, r)
+			return
+		}
+		protected.ServeHTTP(w, r)
+	})
+}
+
 func corsMiddleware(origin string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		h := w.Header()
 		h.Set("Access-Control-Allow-Origin", origin)
 		h.Set("Vary", "Origin")
-		h.Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+		h.Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
 		h.Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		// "*" cannot be combined with credentials per spec, so only set
+		// the credentials header when the operator pinned an exact origin.
+		if origin != "*" {
+			h.Set("Access-Control-Allow-Credentials", "true")
+		}
 		if req.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return

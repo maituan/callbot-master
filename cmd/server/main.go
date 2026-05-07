@@ -20,6 +20,7 @@ import (
 	"callbot-master/config"
 	"callbot-master/internal/api"
 	"callbot-master/internal/asr"
+	"callbot-master/internal/auth"
 	"callbot-master/internal/bot"
 	"callbot-master/internal/campaign"
 	"callbot-master/internal/freeswitch"
@@ -86,6 +87,37 @@ func main() {
 		}
 		defer pgStore.Close()
 		slog.Info("postgres connected", "dsn_masked", maskDSN(cfg.Postgres.DSN))
+
+		// Bootstrap the platform admin from env every startup. Cheap; lets
+		// operators rotate the password by changing env + restarting.
+		if cfg.Auth.PlatformAdminPassword != "" {
+			hash, err := auth.HashPassword(cfg.Auth.PlatformAdminPassword)
+			if err != nil {
+				slog.Error("hash admin password", "err", err)
+				os.Exit(1)
+			}
+			if err := pgStore.UpsertPlatformAdmin(rootCtx, cfg.Auth.PlatformAdminUser, hash); err != nil {
+				slog.Error("upsert platform_admin", "err", err)
+				os.Exit(1)
+			}
+			slog.Info("platform_admin bootstrapped", "user", cfg.Auth.PlatformAdminUser)
+		} else {
+			slog.Warn("MASTER_PLATFORM_ADMIN_PASSWORD not set — login will fail until you set it")
+		}
+	}
+
+	// JWT issuer. nil-tolerant: if no secret is configured, auth-protected
+	// routes will reject every request with 401 and the UI shows the
+	// login page indefinitely.
+	var issuer *auth.Issuer
+	if cfg.Auth.JWTSecret != "" {
+		issuer, err = auth.NewIssuer(cfg.Auth.JWTSecret, cfg.Auth.JWTTTL)
+		if err != nil {
+			slog.Error("jwt issuer init", "err", err)
+			os.Exit(1)
+		}
+	} else {
+		slog.Warn("MASTER_JWT_SECRET not set — auth disabled, /api/v1/auth/* will 503")
 	}
 
 	// Provider clients. ASR dial happens here; TTS+bot are lazy per-call.
@@ -186,6 +218,16 @@ func main() {
 	// HTTP server (health/metrics + campaigns API).
 	router := api.New(manager, mc)
 	router.SetCORS(cfg.Server.CORSAllowOrigin)
+	router.SetAuth(issuer)
+	if issuer != nil && pgStore != nil {
+		api.RegisterAuth(router.Mux(), api.AuthDeps{
+			Issuer:       issuer,
+			Store:        pgStore,
+			CookieSecure: cfg.Auth.CookieSecure,
+		})
+	} else {
+		api.RegisterAuth(router.Mux(), api.AuthDeps{}) // mounts 503 stubs
+	}
 	api.RegisterCampaigns(router.Mux(), api.CampaignDeps{
 		Manager:         campaigns,
 		BindFunc:        outbound.MakeCampaignOriginateFuncWithManager,

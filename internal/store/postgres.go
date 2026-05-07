@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,9 +11,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
-
-//go:embed schema.sql
-var schemaSQL string
 
 // Postgres is the concrete impl backed by pgx v5.
 type Postgres struct {
@@ -47,12 +43,16 @@ func New(ctx context.Context, dsn string) (*Postgres, error) {
 		return nil, fmt.Errorf("ping: %w", err)
 	}
 
-	if _, err := pool.Exec(ctx, schemaSQL); err != nil {
+	if err := applyMigrations(ctx, pool); err != nil {
 		pool.Close()
-		return nil, fmt.Errorf("apply schema: %w", err)
+		return nil, fmt.Errorf("apply migrations: %w", err)
 	}
 	return &Postgres{pool: pool}, nil
 }
+
+// Pool exposes the underlying pgxpool.Pool for adjacent stores
+// (users, tenants, bots) that share the same DB connection.
+func (p *Postgres) Pool() *pgxpool.Pool { return p.pool }
 
 // Close releases the pool. Idempotent.
 func (p *Postgres) Close() {
