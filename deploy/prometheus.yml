@@ -1,0 +1,16 @@
+# Prometheus scrape config for the local callbot-master stack.
+# All services run on host network so we scrape via 127.0.0.1:<port>.
+
+global:
+  scrape_interval: 5s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: callbot-master
+    static_configs:
+      - targets: ["127.0.0.1:18083"]
+    metrics_path: /metrics
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["127.0.0.1:19090"]

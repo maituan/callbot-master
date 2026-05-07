@@ -1,0 +1,38 @@
+syntax = "proto3";
+
+package streaming_voice;
+
+option go_package = "voicebot/proto/streaming_voice;stt";
+
+service StreamVoice { 
+  rpc SendVoice(stream VoiceRequest) returns (stream TextReply);
+}
+
+message VoiceRequest {
+  bytes byte_buff = 1;
+}
+
+message TextReply {
+  int32 status = 1;
+  int32 segment = 2; // Số 2
+  string id = 3;      // Số 3
+  Result result = 4;  // Số 4
+  float segment_start = 5;  // Số 5
+  float segment_length = 6; // Số 6
+  float total_length = 7;   // Số 7
+  string msg = 8;     // Số 8 (Quan trọng: Server Viettel để msg ở số 8)
+  string audio_url = 9;
+}
+
+message Result {
+  message Hypothese {
+    string transcript = 1;
+    string transcript_normed = 2;
+    string transcript_urlencoded = 3;
+    string transcript_normed_urlencoded = 4;
+    float confidence = 5;
+    float likelihood = 6;
+  }
+  repeated Hypothese hypotheses = 1;
+  bool final = 2;
+}

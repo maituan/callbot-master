@@ -1,0 +1,11 @@
+apiVersion: 1
+
+# Auto-provision Prometheus datasource so Grafana picks it up on first boot.
+# All services run on host net → 127.0.0.1:19090 (overridden in compose).
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://127.0.0.1:19090
+    isDefault: true
+    editable: true

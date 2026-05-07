@@ -1,0 +1,63 @@
+server:
+  http_addr: ":8083"
+
+freeswitch:
+  host: "127.0.0.1:8021"
+  password: "ClueCon"
+  domain: "voiceai.autotele.vn"
+
+asr:
+  endpoint: "103.253.20.28:9000"
+  token: ""
+  silence_timeout: 800ms
+  speech_timeout: 10s
+  speech_max: 30s
+  single_sentence: true
+
+tts:
+  endpoint: "ws://103.253.20.27:8767"
+  token: ""
+  voice_id: ""
+  resample_rate: 8000
+  tempo: 1.0
+
+bot:
+  url: "http://localhost:11006/api/v1/call/"
+  first_byte_timeout: 5s
+  total_timeout: 25s
+
+vad:
+  energy_threshold: 500.0
+  min_speech_duration: 200ms
+  min_silence_duration: 600ms
+
+audio:
+  sample_rate: 8000
+  frame_samples: 320
+  recordings_dir: "/dev/shm/bridge/recordings"
+  tts_dir: "/dev/shm/bridge/tts"
+
+inbound:
+  did: "5000000024"
+  pickup_timeout: 30s
+  scenario: "hcc-inbound"
+
+barge_in:
+  enabled: false
+
+filler:
+  enabled: false
+
+postgres:
+  dsn: ""
+
+# OpenTelemetry tracing. Disabled when endpoint is empty.
+# Standard OTEL_* env vars override these values at runtime.
+telemetry:
+  endpoint: ""              # e.g. "tempo:4317"
+  service_name: "callbot-master"
+  insecure: true            # plaintext gRPC for local dev
+
+log:
+  level: "info"
+  format: "json"
