@@ -2,6 +2,7 @@
 #
 # What's included:
 #   master      — the Go service (built from ../Dockerfile)
+#   ui          — Next.js ops console on :3001 (built from ../../callbot-master-ui)
 #   postgres    — call_history persistence
 #   prometheus  — scrapes master:/metrics
 #   grafana     — dashboards (anonymous viewer for dev convenience)
@@ -61,6 +62,9 @@ services:
       MASTER_RECORDING_FILE_EXT: "${MASTER_RECORDING_FILE_EXT:-.mp3}"
       MASTER_LOG_LEVEL: "${MASTER_LOG_LEVEL:-info}"
       MASTER_LOG_FORMAT: "${MASTER_LOG_FORMAT:-json}"
+      # Set to the UI origin (e.g. http://localhost:3001) when running the
+      # ops UI on a separate port. "" disables CORS entirely.
+      MASTER_CORS_ALLOW_ORIGIN: "${MASTER_CORS_ALLOW_ORIGIN:-http://localhost:3001}"
       OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
       OTEL_SERVICE_NAME: "${OTEL_SERVICE_NAME:-callbot-master}"
       MASTER_OTEL_INSECURE: "${MASTER_OTEL_INSECURE:-true}"
@@ -107,6 +111,26 @@ services:
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - promdata:/prometheus
+    restart: unless-stopped
+
+  ui:
+    # Ops console — Next.js. Builds from the sibling callbot-master-ui repo
+    # checked out at ../../callbot-master-ui (one level above this repo).
+    # The bundle gets NEXT_PUBLIC_MASTER_URL baked in at build time; in dev
+    # it points at host:18083 so the browser can reach master via host net.
+    build:
+      context: ../../callbot-master-ui
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_MASTER_URL: "${UI_MASTER_URL:-http://localhost:18083}"
+    image: callbot-master-ui:dev
+    container_name: callbot-master-ui
+    network_mode: host
+    environment:
+      PORT: "${UI_PORT:-3001}"
+      NEXT_PUBLIC_MASTER_URL: "${UI_MASTER_URL:-http://localhost:18083}"
+    depends_on:
+      - master
     restart: unless-stopped
 
   grafana:
