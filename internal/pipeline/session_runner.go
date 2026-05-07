@@ -373,6 +373,26 @@ func (r *SessionRunner) Run(parent context.Context, opts RunOpts) (retErr error)
 	if pCfg.SampleRate == 0 {
 		pCfg = Defaults()
 	}
+	// Per-call provider params come from the bot snapshot, NOT the global
+	// env-derived PipelineCfg. The previous code used pCfg.VoiceID/Tempo
+	// for every call, so editing voice in the UI did nothing on the wire.
+	if opts.Bot != nil {
+		if opts.Bot.TTSVoiceID != "" {
+			pCfg.VoiceID = opts.Bot.TTSVoiceID
+		}
+		if opts.Bot.TTSTempo > 0 {
+			pCfg.Tempo = opts.Bot.TTSTempo
+		}
+		if opts.Bot.ASRSilenceTimeoutSec > 0 {
+			pCfg.ASRSilenceTimeout = time.Duration(opts.Bot.ASRSilenceTimeoutSec) * time.Second
+		}
+		if opts.Bot.ASRSpeechTimeoutSec > 0 {
+			pCfg.ASRSpeechTimeout = time.Duration(opts.Bot.ASRSpeechTimeoutSec) * time.Second
+		}
+		if opts.Bot.ASRSpeechMaxSec > 0 {
+			pCfg.ASRSpeechMax = time.Duration(opts.Bot.ASRSpeechMaxSec) * time.Second
+		}
+	}
 	var v vad.Detector
 	if r.NewVAD != nil {
 		v = r.NewVAD()
