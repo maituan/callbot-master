@@ -38,7 +38,9 @@ services:
       MASTER_TTS_VOICE_ID: "${MASTER_TTS_VOICE_ID:-thuyanh-north}"
       MASTER_INBOUND_DID: "${MASTER_INBOUND_DID:-5000000024}"
       MASTER_BARGE_IN: "${MASTER_BARGE_IN:-false}"
-      MASTER_PG_DSN: "postgres://callbot:callbot@127.0.0.1:5432/callbot?sslmode=disable"
+      # postgres is on bridge net mapped to 127.0.0.1:5433 (5432 is reserved
+      # for the host's own postgres in dev environments).
+      MASTER_PG_DSN: "postgres://callbot:callbot@127.0.0.1:5433/callbot?sslmode=disable"
       MASTER_LOG_LEVEL: "${MASTER_LOG_LEVEL:-info}"
       OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
       OTEL_SERVICE_NAME: "callbot-master"
@@ -54,12 +56,14 @@ services:
   postgres:
     image: postgres:16-alpine
     container_name: callbot-postgres
-    network_mode: host
+    # Bridge network with explicit 127.0.0.1 binding so we don't fight the
+    # host's existing postgres on 5432. Master reaches us via host loopback.
+    ports:
+      - "127.0.0.1:5433:5432"
     environment:
       POSTGRES_USER: callbot
       POSTGRES_PASSWORD: callbot
       POSTGRES_DB: callbot
-      POSTGRES_HOST_AUTH_METHOD: trust # local dev only
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
