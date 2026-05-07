@@ -185,6 +185,7 @@ func main() {
 
 	// HTTP server (health/metrics + campaigns API).
 	router := api.New(manager, mc)
+	router.SetCORS(cfg.Server.CORSAllowOrigin)
 	api.RegisterCampaigns(router.Mux(), api.CampaignDeps{
 		Manager:         campaigns,
 		BindFunc:        outbound.MakeCampaignOriginateFuncWithManager,

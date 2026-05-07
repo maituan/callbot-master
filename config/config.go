@@ -49,6 +49,14 @@ type RecordingConfig struct {
 
 type ServerConfig struct {
 	HTTPAddr string `yaml:"http_addr"` // e.g. ":8083"
+	// CORSAllowOrigin sets Access-Control-Allow-Origin on /api/* and
+	// /recordings/* responses so the ops UI can call master from a different
+	// origin (e.g. http://localhost:3001 in dev). Common values:
+	//   ""  (default) — disabled, no header set.
+	//   "*" — allow any origin (no credentials).
+	//   "http://localhost:3001" — exact origin.
+	// In prod, prefer same-origin via reverse proxy and leave this empty.
+	CORSAllowOrigin string `yaml:"cors_allow_origin"`
 }
 
 type FreeSWITCHConfig struct {
@@ -256,6 +264,7 @@ func defaults() *Config {
 
 func applyEnvOverrides(c *Config) {
 	envStr("MASTER_HTTP_ADDR", &c.Server.HTTPAddr)
+	envStr("MASTER_CORS_ALLOW_ORIGIN", &c.Server.CORSAllowOrigin)
 	envStr("MASTER_FS_HOST", &c.FreeSWITCH.Host)
 	envStr("MASTER_FS_PASSWORD", &c.FreeSWITCH.Password)
 	envStr("MASTER_FS_DOMAIN", &c.FreeSWITCH.Domain)

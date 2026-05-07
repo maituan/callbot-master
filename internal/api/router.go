@@ -18,6 +18,10 @@ type Router struct {
 	manager   *session.Manager
 	metrics   *metrics.Collectors
 	startedAt time.Time
+	// corsOrigin, if non-empty, is echoed in Access-Control-Allow-Origin on
+	// every response and short-circuits OPTIONS preflights with 204.
+	// Set via SetCORS — empty means CORS disabled.
+	corsOrigin string
 }
 
 // New wires /health and /metrics. metrics may be nil — the endpoint then
@@ -39,7 +43,32 @@ func New(mgr *session.Manager, m *metrics.Collectors) *Router {
 	return r
 }
 
-func (r *Router) Handler() http.Handler { return r.mux }
+func (r *Router) Handler() http.Handler {
+	if r.corsOrigin == "" {
+		return r.mux
+	}
+	return corsMiddleware(r.corsOrigin, r.mux)
+}
+
+// SetCORS enables Access-Control-Allow-Origin on responses. Pass "" to
+// disable, "*" to allow any origin, or an exact origin like
+// "http://localhost:3001". Has no effect on requests already same-origin.
+func (r *Router) SetCORS(origin string) { r.corsOrigin = origin }
+
+func corsMiddleware(origin string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		h := w.Header()
+		h.Set("Access-Control-Allow-Origin", origin)
+		h.Set("Vary", "Origin")
+		h.Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+		h.Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		if req.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, req)
+	})
+}
 
 // Mux exposes the underlying mux so feature packages (campaigns, calls)
 // can register their own routes without going through Router.
