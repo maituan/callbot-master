@@ -187,11 +187,11 @@ func defaults() *Config {
 		},
 		ASR: ASRConfig{
 			Endpoint: "103.253.20.28:9000",
-			// Defaults tuned for natural Vietnamese phone calls. SilenceTimeout
-			// is the "caller never spoke" cap; SpeechTimeout cuts the turn as
-			// soon as 800 ms of trailing silence appears mid-utterance.
-			SilenceTimeout: 5 * time.Second,
-			SpeechTimeout:  800 * time.Millisecond,
+			// Viettel STT expects integer-second values for these timeouts —
+			// sub-second config gets rounded up at send time. Defaults tuned
+			// for natural Vietnamese phone calls.
+			SilenceTimeout: 5 * time.Second, // caller-never-spoke cap
+			SpeechTimeout:  1 * time.Second, // mid-utterance trailing silence cut
 			SpeechMax:      30 * time.Second,
 			SingleSentence: true,
 		},

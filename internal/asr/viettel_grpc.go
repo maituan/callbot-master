@@ -66,9 +66,9 @@ func (c *ViettelClient) StartStream(ctx context.Context, opts StreamOpts) (Strea
 		"token":           c.token,
 		"id":              opts.ConversationID,
 		"single-sentence": boolStr(opts.SingleSentence),
-		"silence_timeout": msFloat(opts.SilenceTimeoutMs),
-		"speech_timeout":  msFloat(opts.SpeechTimeoutMs),
-		"speech_max":      msSec(opts.SpeechMaxMs),
+		"silence_timeout": toSecStr(opts.SilenceTimeoutMs),
+		"speech_timeout":  toSecStr(opts.SpeechTimeoutMs),
+		"speech_max":      toSecStr(opts.SpeechMaxMs),
 	})
 	streamCtx, cancel := context.WithCancel(ctx)
 	streamCtx = metadata.NewOutgoingContext(streamCtx, md)
@@ -183,19 +183,16 @@ func boolStr(b bool) string {
 	return "false"
 }
 
-// Viettel metadata expects fractional seconds (not ms) for silence_timeout
-// and speech_timeout per the v1 reference. Convert ms→s string.
-func msFloat(ms int) string {
+// Viettel ASR's metadata fields expect *integer seconds* as a string —
+// "1" / "5" / "30", never "0.8" or "1s". Sub-second values are rounded UP
+// to 1 so a config of e.g. 800ms doesn't silently become 0.
+func toSecStr(ms int) string {
 	if ms <= 0 {
 		return "0"
 	}
-	return strconv.FormatFloat(float64(ms)/1000.0, 'f', -1, 64)
-}
-
-// speech_max is documented in seconds (integer).
-func msSec(ms int) string {
-	if ms <= 0 {
-		return "30"
+	s := ms / 1000
+	if s == 0 {
+		s = 1
 	}
-	return strconv.Itoa(ms / 1000)
+	return strconv.Itoa(s)
 }
