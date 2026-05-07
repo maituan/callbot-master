@@ -77,6 +77,14 @@ func (h *InboundHandler) onPark(ev *eventsocket.Event) {
 		"call_uuid", uuid, "from", caller, "did", dest)
 
 	// Spawn the session in a goroutine — never block the ESL loop.
+	//
+	// Earlier versions of this code launched a 30 s "pickup SLA" watchdog
+	// here because the SIP team had `sched_hangup +30 allotted_timeout`
+	// in the dialplan and we wanted a master-side warning when audio
+	// path setup didn't complete in time. The SIP team has since removed
+	// the sched_hangup, so the watchdog only ever fired on long calls
+	// (false positive). Removed; PickupSLA stays in config as a
+	// documented soft target but is not enforced.
 	h.wg.Add(1)
 	go func() {
 		defer h.wg.Done()
@@ -88,18 +96,6 @@ func (h *InboundHandler) onPark(ev *eventsocket.Event) {
 			NeedsAnswer: true,
 			StartedAt:   startedAt,
 		}
-		// Log SLA breach if our setup runs past PickupSLA.
-		go func() {
-			select {
-			case <-time.After(h.d.PickupSLA):
-				if _, ok := h.d.Runner.Sessions.Get(uuid); !ok {
-					return
-				}
-				slog.Warn("pickup SLA exceeded",
-					"call_uuid", uuid, "sla", h.d.PickupSLA.String())
-			case <-h.rootCtx.Done():
-			}
-		}()
 		if err := h.d.Runner.Run(h.rootCtx, opts); err != nil {
 			slog.Error("inbound session ended with error",
 				"call_uuid", uuid, "err", err)
