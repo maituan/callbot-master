@@ -27,15 +27,16 @@ RUN --mount=type=cache,target=/go/pkg/mod \
         -o /out/master ./cmd/server
 
 # ---- runtime ----------------------------------------------------------------
-FROM gcr.io/distroless/static-debian12:nonroot
+# Run as root so the master can read/write the recording + TTS FIFOs under
+# /dev/shm/bridge that are shared with the FreeSWITCH process on the host.
+# A nonroot variant would need both sides aligned on a shared UID/GID; we
+# keep things simple here. Switch back to :nonroot once a uid-mapped FIFO
+# story is in place.
+FROM gcr.io/distroless/static-debian12
 
 WORKDIR /app
 COPY --from=builder /out/master /app/master
 COPY --from=builder /src/config/config.yaml /app/config/config.yaml
-
-# Non-root user from distroless. /dev/shm/bridge needs to be writable for FIFOs;
-# in Docker mount it as tmpfs in compose (see deploy/docker-compose.yml).
-USER nonroot:nonroot
 
 EXPOSE 8083
 ENTRYPOINT ["/app/master"]
