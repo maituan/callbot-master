@@ -39,8 +39,9 @@ type SessionRunner struct {
 	TTSDir       string
 	FrameBytes   int
 	PipelineCfg  Config
-	BargeIn      bool                // toggle barge-in detection during Speak
-	Metrics      *metrics.Collectors // nil-safe
+	BargeIn       bool                // toggle barge-in detection during Speak
+	BargeMinWords int                 // word threshold; 0 → use Pipeline default (3)
+	Metrics       *metrics.Collectors // nil-safe
 	Store        CallStore           // nil-safe — when set, every call is persisted at end of Run
 }
 
@@ -208,6 +209,7 @@ func (r *SessionRunner) Run(parent context.Context, opts RunOpts) (retErr error)
 	p.Scenario = opts.Scenario
 	p.Metrics = r.Metrics
 	p.BargeIn = r.BargeIn
+	p.BargeMinWords = r.BargeMinWords
 	p.ESL = r.ESL // satisfies bargeESL interface
 
 	// Greeting turn (empty user message → bot decides based on history).

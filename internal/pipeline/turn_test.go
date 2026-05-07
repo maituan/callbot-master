@@ -9,7 +9,6 @@ import (
 	"callbot-master/internal/asr"
 	"callbot-master/internal/bot"
 	"callbot-master/internal/tts"
-	"callbot-master/internal/vad"
 )
 
 // chanSource is a test-only AudioSource backed by a chan.
@@ -81,43 +80,6 @@ func TestPipeline_Listen_ReturnsFinalTranscript(t *testing.T) {
 	}
 	if asrStream.CloseSentAt == 0 {
 		t.Fatal("expected CloseSend to be called when src EOFs")
-	}
-}
-
-func TestPipeline_Listen_VADSpeechEndClosesSend(t *testing.T) {
-	asrCli, asrStream := newASRMock()
-	v := &vad.MockDetector{}
-
-	src := &chanSource{ch: make(chan []byte, 16)}
-	// Pre-load enough frames; we won't close (rely on VAD to stop the loop).
-	for i := 0; i < 5; i++ {
-		src.ch <- make([]byte, 320)
-	}
-
-	cfg := Defaults()
-	cfg.SilentTimeout = 5 * time.Second
-	p := New("call-1", cfg, asrCli, nil, nil, v)
-
-	// Arm VAD to fire SpeechEnd on its very next Push, and emit IsFinal
-	// after CloseSend kicks in.
-	v.Next = vad.EventSpeechEnd
-	go func() {
-		time.Sleep(20 * time.Millisecond)
-		asrStream.Emit(asr.Result{Text: "alo", IsFinal: true})
-	}()
-
-	got, err := p.Listen(context.Background(), src)
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
-	if got != "alo" {
-		t.Fatalf("transcript = %q", got)
-	}
-	if asrStream.CloseSentAt == 0 {
-		t.Fatal("VAD SpeechEnd should trigger CloseSend")
-	}
-	if len(asrStream.Pushed) == 0 {
-		t.Fatal("at least one frame should have been sent before SpeechEnd")
 	}
 }
 

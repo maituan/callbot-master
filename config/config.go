@@ -37,13 +37,27 @@ type FreeSWITCHConfig struct {
 	Domain   string `yaml:"domain"`   // "voiceai.autotele.vn"
 }
 
+// ASRConfig knobs map to Viettel STT metadata fields. The two timeouts are
+// independent and do *different* things:
+//
+//   - SpeechTimeout: while caller is mid-utterance, this is the trailing
+//     silence that flushes a *non-empty* IsFinal transcript ("they
+//     stopped talking, here's what they said").
+//
+//   - SilenceTimeout: caller hasn't said anything yet; after this duration
+//     the server flushes an *empty* IsFinal ("nothing to transcribe,
+//     move on"). Pipeline.RunTurn turns the empty result into a
+//     "skip bot, listen again" branch.
+//
+//   - SpeechMax: hard cap on a single utterance even if the caller keeps
+//     talking. Defensive against runaway streams.
 type ASRConfig struct {
-	Endpoint        string        `yaml:"endpoint"` // "103.253.20.28:9000"
-	Token           string        `yaml:"token"`
-	SilenceTimeout  time.Duration `yaml:"silence_timeout"`
-	SpeechTimeout   time.Duration `yaml:"speech_timeout"`
-	SpeechMax       time.Duration `yaml:"speech_max"`
-	SingleSentence  bool          `yaml:"single_sentence"`
+	Endpoint       string        `yaml:"endpoint"` // "103.253.20.28:9000"
+	Token          string        `yaml:"token"`
+	SilenceTimeout time.Duration `yaml:"silence_timeout"`
+	SpeechTimeout  time.Duration `yaml:"speech_timeout"`
+	SpeechMax      time.Duration `yaml:"speech_max"`
+	SingleSentence bool          `yaml:"single_sentence"`
 }
 
 type TTSConfig struct {
@@ -90,6 +104,10 @@ type InboundConfig struct {
 
 type BargeInConfig struct {
 	Enabled bool `yaml:"enabled"`
+	// MinWords is the running-transcript word count that trips barge-in.
+	// 3 is a good default — long enough to ignore "vâng"/"ờ" backchannel,
+	// short enough to feel responsive.
+	MinWords int `yaml:"min_words"`
 }
 
 type FillerConfig struct {
@@ -168,9 +186,12 @@ func defaults() *Config {
 			Domain:   "voiceai.autotele.vn",
 		},
 		ASR: ASRConfig{
-			Endpoint:       "103.253.20.28:9000",
-			SilenceTimeout: 800 * time.Millisecond,
-			SpeechTimeout:  10 * time.Second,
+			Endpoint: "103.253.20.28:9000",
+			// Defaults tuned for natural Vietnamese phone calls. SilenceTimeout
+			// is the "caller never spoke" cap; SpeechTimeout cuts the turn as
+			// soon as 800 ms of trailing silence appears mid-utterance.
+			SilenceTimeout: 5 * time.Second,
+			SpeechTimeout:  800 * time.Millisecond,
 			SpeechMax:      30 * time.Second,
 			SingleSentence: true,
 		},
@@ -200,7 +221,7 @@ func defaults() *Config {
 			PickupTimeout: 30 * time.Second,
 			Scenario:      "hcc-inbound",
 		},
-		BargeIn:   BargeInConfig{Enabled: false},
+		BargeIn:   BargeInConfig{Enabled: false, MinWords: 3},
 		Filler:    FillerConfig{Enabled: false},
 		Telemetry: TelemetryConfig{ServiceName: "callbot-master", Insecure: true},
 		Log:       LogConfig{Level: "info", Format: "json"},
@@ -214,6 +235,9 @@ func applyEnvOverrides(c *Config) {
 	envStr("MASTER_FS_DOMAIN", &c.FreeSWITCH.Domain)
 	envStr("MASTER_ASR_ENDPOINT", &c.ASR.Endpoint)
 	envStr("MASTER_ASR_TOKEN", &c.ASR.Token)
+	envDur("MASTER_ASR_SILENCE_TIMEOUT", &c.ASR.SilenceTimeout)
+	envDur("MASTER_ASR_SPEECH_TIMEOUT", &c.ASR.SpeechTimeout)
+	envDur("MASTER_ASR_SPEECH_MAX", &c.ASR.SpeechMax)
 	envStr("MASTER_TTS_ENDPOINT", &c.TTS.Endpoint)
 	envStr("MASTER_TTS_TOKEN", &c.TTS.Token)
 	envStr("MASTER_TTS_VOICE_ID", &c.TTS.VoiceID)
@@ -226,6 +250,7 @@ func applyEnvOverrides(c *Config) {
 	envStr("MASTER_INBOUND_DID", &c.Inbound.DID)
 	envStr("MASTER_INBOUND_SCENARIO", &c.Inbound.Scenario)
 	envBool("MASTER_BARGE_IN", &c.BargeIn.Enabled)
+	envInt("MASTER_BARGE_MIN_WORDS", &c.BargeIn.MinWords)
 	envBool("MASTER_FILLER", &c.Filler.Enabled)
 	// OTEL standard env vars take precedence; fallback to MASTER_OTEL_*.
 	if v := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"); v != "" {
@@ -254,6 +279,16 @@ func envDur(key string, dst *time.Duration) {
 	}
 	if d, err := time.ParseDuration(v); err == nil {
 		*dst = d
+	}
+}
+
+func envInt(key string, dst *int) {
+	v := os.Getenv(key)
+	if v == "" {
+		return
+	}
+	if n, err := strconv.Atoi(v); err == nil {
+		*dst = n
 	}
 }
 

@@ -9,8 +9,11 @@ freeswitch:
 asr:
   endpoint: "103.253.20.28:9000"
   token: ""
-  silence_timeout: 800ms
-  speech_timeout: 10s
+  # silence_timeout: caller chưa nói gì → ASR finalize empty (skip Speak).
+  # speech_timeout: caller pause mid-utterance → ASR finalize with text.
+  # speech_max: hard cap per utterance.
+  silence_timeout: 5s
+  speech_timeout: 800ms
   speech_max: 30s
   single_sentence: true
 

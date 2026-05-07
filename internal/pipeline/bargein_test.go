@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"callbot-master/internal/asr"
 	"callbot-master/internal/bot"
-	"callbot-master/internal/vad"
 )
 
 // fakeESL records uuid_break calls for barge-in verification.
@@ -19,70 +19,114 @@ func (f *fakeESL) StopPlayback(uuid string) error {
 	return nil
 }
 
-func TestSpeak_BargeIn_TriggersCancelAndReplay(t *testing.T) {
+func TestSpeak_BargeIn_TriggersOnNWordsAndCapturesTranscript(t *testing.T) {
+	asrCli, asrStream := newASRMock()
 	botCli, turn := newBotMock(bot.ActionChat)
 	ttsCli, ttsStream := newTTSMock()
 	esl := &fakeESL{}
 
 	cfg := Defaults()
-	p := New("call-1", cfg, nil, ttsCli, botCli, &vad.MockDetector{})
+	p := New("call-1", cfg, asrCli, ttsCli, botCli, nil)
 	p.BargeIn = true
+	p.BargeMinWords = 3
 	p.ESL = esl
 	p.Scenario = "test"
 
-	// Drive bot to emit one sentence then HOLD (don't close turn) so the
-	// barge-in race window is open.
+	// Bot emits one sentence then HOLDs so the action select races against
+	// barge-in.
 	go func() {
 		time.Sleep(5 * time.Millisecond)
 		turn.EmitSentence("Em xin chào, anh chị cần gì ạ?")
-		// don't close turn until barge-in cancels the bot ctx
 	}()
 
-	// Audio source we drive frame-by-frame so we can arm VAD between frames.
+	// Feed audio frames so the monitor's audio pump runs; the actual
+	// bytes don't matter for the mock ASR.
 	src := &chanSource{ch: make(chan []byte, 8)}
-	vadDet := p.VAD.(*vad.MockDetector)
+	for i := 0; i < 4; i++ {
+		src.ch <- bytes.Repeat([]byte{0x10, 0x20}, 160)
+	}
 
-	// Feed: 2 quiet frames (ringbuf gets data), arm VAD, 1 barge-in frame.
+	// Two-word partial first → MUST NOT trigger. Then 4-word → trigger.
 	go func() {
-		frame := func() []byte { return bytes.Repeat([]byte{0x10, 0x20}, 160) }
-		src.ch <- frame()
-		src.ch <- frame()
-		time.Sleep(20 * time.Millisecond) // let monitor consume above frames
-		vadDet.Next = vad.EventSpeechStart
-		src.ch <- frame() // this Push returns SpeechStart → barge-in fires
+		time.Sleep(15 * time.Millisecond)
+		asrStream.Emit(asr.Result{Text: "tôi muốn"}) // 2 words → ignored
+		time.Sleep(10 * time.Millisecond)
+		asrStream.Emit(asr.Result{Text: "tôi muốn cấp đổi căn cước"}) // 5 → trigger
 	}()
 
-	// Push a TTS audio frame so we have something in flight when the
-	// barge-in chain calls ttsStream.Close().
+	// Push some TTS audio so we have something in flight when barge-in
+	// closes the stream.
 	go func() {
 		time.Sleep(10 * time.Millisecond)
 		ttsStream.PushAudio(bytes.Repeat([]byte{0x01}, 100))
 	}()
 
 	var sink bytes.Buffer
-	action, err := p.Speak(context.Background(), src, &sink, "test message")
+	action, err := p.Speak(context.Background(), src, &sink, "")
 	if err != nil {
 		t.Fatalf("Speak: %v", err)
 	}
 	if action != bot.ActionChat {
-		t.Fatalf("action = %q, want CHAT (barge-in forces CHAT)", action)
+		t.Fatalf("action = %q, want CHAT", action)
 	}
 	if esl.stops.Load() == 0 {
 		t.Fatal("expected uuid_break (StopPlayback) to be called on barge-in")
 	}
-	if len(p.pendingReplay) == 0 {
-		t.Fatal("expected pendingReplay to be set after barge-in")
+	if p.pendingTranscript != "tôi muốn cấp đổi căn cước" {
+		t.Fatalf("pendingTranscript = %q", p.pendingTranscript)
 	}
 }
 
-func TestSpeak_NoBargeIn_NoMonitorWhenDisabled(t *testing.T) {
-	// When BargeIn=false, src is ignored — no monitor goroutine, no
-	// frames consumed by the pipeline during Speak.
+func TestSpeak_BargeIn_BelowThresholdNoTrigger(t *testing.T) {
+	asrCli, asrStream := newASRMock()
+	botCli, turn := newBotMock(bot.ActionChat)
+	ttsCli, ttsStream := newTTSMock()
+	esl := &fakeESL{}
+
+	cfg := Defaults()
+	p := New("call-1", cfg, asrCli, ttsCli, botCli, nil)
+	p.BargeIn = true
+	p.BargeMinWords = 3
+	p.ESL = esl
+
+	src := &chanSource{ch: make(chan []byte, 4)}
+	src.ch <- bytes.Repeat([]byte{0x10}, 320)
+
+	// Only 2 words emitted — must not trigger. Bot finishes normally.
+	go func() {
+		time.Sleep(5 * time.Millisecond)
+		asrStream.Emit(asr.Result{Text: "vâng dạ"})
+		time.Sleep(5 * time.Millisecond)
+		turn.EmitSentence("Em hiểu rồi.")
+		turn.Close()
+		ttsStream.PushAudio([]byte{0x01, 0x02})
+		ttsStream.Close()
+	}()
+
+	var sink bytes.Buffer
+	action, err := p.Speak(context.Background(), src, &sink, "alo")
+	if err != nil {
+		t.Fatalf("Speak: %v", err)
+	}
+	if action != bot.ActionChat {
+		t.Fatalf("action = %q", action)
+	}
+	if esl.stops.Load() != 0 {
+		t.Fatalf("uuid_break should NOT fire below word threshold (got %d)", esl.stops.Load())
+	}
+	if p.pendingTranscript != "" {
+		t.Fatalf("pendingTranscript should be empty when below threshold, got %q", p.pendingTranscript)
+	}
+}
+
+func TestSpeak_NoBargeIn_DrainsSrc(t *testing.T) {
+	// When BargeIn=false, Speak still drains src (so audio doesn't pile
+	// up between turns). The frame should be consumed.
 	botCli, turn := newBotMock(bot.ActionChat)
 	ttsCli, ttsStream := newTTSMock()
 
 	cfg := Defaults()
-	p := New("call-1", cfg, nil, ttsCli, botCli, &vad.MockDetector{})
+	p := New("call-1", cfg, nil, ttsCli, botCli, nil)
 	p.BargeIn = false
 
 	go func() {
@@ -104,52 +148,53 @@ func TestSpeak_NoBargeIn_NoMonitorWhenDisabled(t *testing.T) {
 	if action != bot.ActionChat {
 		t.Fatalf("action = %q", action)
 	}
-	if len(p.pendingReplay) != 0 {
-		t.Fatal("pendingReplay should be empty when barge-in disabled")
-	}
-
-	// With barge-in off, Speak still drains src into /dev/null so audio
-	// doesn't pile up between turns. Frame should be consumed (no leftover
-	// for the next Listen).
 	select {
 	case _, ok := <-src.ch:
 		if ok {
-			t.Fatal("expected src to be drained by Speak (got an unread frame)")
+			t.Fatal("expected src to be drained by Speak")
 		}
 	default:
-		// Closed-or-empty is fine; we asserted "no unread leftover" above.
+		// closed/empty is fine
 	}
 }
 
-func TestListen_ReplayPrependedFromPendingReplay(t *testing.T) {
-	asrCli, asrStream := newASRMock()
+func TestRunTurn_UsesPendingTranscriptInsteadOfListen(t *testing.T) {
+	asrCli, _ := newASRMock()
+	botCli, turn := newBotMock(bot.ActionChat)
+	ttsCli, ttsStream := newTTSMock()
 
 	cfg := Defaults()
-	cfg.SilentTimeout = 2 * time.Second
-	p := New("call-1", cfg, asrCli, nil, nil, nil)
-	p.pendingReplay = bytes.Repeat([]byte{0xAA, 0xBB}, 200) // 400 bytes
+	p := New("call-1", cfg, asrCli, ttsCli, botCli, nil)
+	p.pendingTranscript = "tôi muốn cấp đổi căn cước"
 
-	src := &chanSource{ch: make(chan []byte, 2)}
-	src.ch <- bytes.Repeat([]byte{0xCC}, 320)
-	close(src.ch)
+	var seenMsg string
+	botCli.OnStream = func(_ context.Context, _, msg string) (bot.TurnStream, error) {
+		seenMsg = msg
+		return turn, nil
+	}
 
 	go func() {
-		time.Sleep(20 * time.Millisecond)
-		asrStream.Emit(asrFinal("đã nghe"))
+		time.Sleep(5 * time.Millisecond)
+		turn.EmitSentence("Dạ, anh chị muốn cấp đổi.")
+		turn.Close()
+		ttsStream.Close()
 	}()
 
-	got, err := p.Listen(context.Background(), src)
+	src := &chanSource{ch: make(chan []byte, 1)}
+	close(src.ch)
+
+	var sink bytes.Buffer
+	cont, err := p.RunTurn(context.Background(), src, &sink)
 	if err != nil {
-		t.Fatalf("Listen: %v", err)
+		t.Fatalf("RunTurn: %v", err)
 	}
-	if got != "đã nghe" {
-		t.Fatalf("transcript = %q", got)
+	if !cont {
+		t.Fatal("RunTurn should continue after CHAT")
 	}
-	if len(p.pendingReplay) != 0 {
-		t.Fatal("pendingReplay should be cleared after Listen consumes it")
+	if seenMsg != "tôi muốn cấp đổi căn cước" {
+		t.Fatalf("bot called with %q, want pending transcript", seenMsg)
 	}
-	// At minimum the replay frames + the src frame should have been pushed.
-	if len(asrStream.Pushed) < 2 {
-		t.Fatalf("ASR pushed %d frames, expected at least 2", len(asrStream.Pushed))
+	if p.pendingTranscript != "" {
+		t.Fatalf("pendingTranscript should be cleared, got %q", p.pendingTranscript)
 	}
 }

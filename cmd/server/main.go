@@ -116,6 +116,9 @@ func main() {
 	pCfg.VoiceID = cfg.TTS.VoiceID
 	pCfg.Tempo = cfg.TTS.Tempo
 	pCfg.ResampleRate = cfg.TTS.ResampleRate
+	pCfg.ASRSilenceTimeout = cfg.ASR.SilenceTimeout
+	pCfg.ASRSpeechTimeout = cfg.ASR.SpeechTimeout
+	pCfg.ASRSpeechMax = cfg.ASR.SpeechMax
 
 	runner := &pipeline.SessionRunner{
 		ESL:          esl,
@@ -128,8 +131,9 @@ func main() {
 		TTSDir:       cfg.Audio.TTSDir,
 		FrameBytes:   cfg.Audio.FrameSamples * 2, // S16LE → 2 bytes per sample
 		PipelineCfg:  pCfg,
-		BargeIn:      cfg.BargeIn.Enabled,
-		Metrics:      mc,
+		BargeIn:       cfg.BargeIn.Enabled,
+		BargeMinWords: cfg.BargeIn.MinWords,
+		Metrics:       mc,
 	}
 	if pgStore != nil {
 		runner.Store = pgStore

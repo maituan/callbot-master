@@ -36,23 +36,34 @@ type AudioSource = audio.Source
 type AudioSink = audio.Sink
 
 // Config carries per-turn knobs that aren't already on the provider opts.
+//
+// ASR timeouts (SilenceTimeout / SpeechTimeout / SpeechMax) are forwarded
+// to the provider via asr.StreamOpts; the meanings match Viettel STT —
+// see config.ASRConfig for the full doc.
 type Config struct {
 	SampleRate     int
 	VoiceID        string
 	Tempo          float64
 	ResampleRate   int
-	SilentTimeout  time.Duration // safety cap when src never EOFs and VAD never fires
+	SilentTimeout  time.Duration // master-side safety cap when src never EOFs (hard upper bound)
 	FirstByteTotal time.Duration // soft alert threshold (logged, doesn't error)
+
+	ASRSilenceTimeout time.Duration // pre-speech silence → empty IsFinal
+	ASRSpeechTimeout  time.Duration // post-speech trailing silence → text IsFinal
+	ASRSpeechMax      time.Duration // hard cap on a single utterance
 }
 
 // Defaults returns a config suitable for the HCC scenario at 8kHz.
 func Defaults() Config {
 	return Config{
-		SampleRate:     8000,
-		ResampleRate:   8000,
-		Tempo:          1.0,
-		SilentTimeout:  30 * time.Second,
-		FirstByteTotal: 5 * time.Second,
+		SampleRate:        8000,
+		ResampleRate:      8000,
+		Tempo:             1.0,
+		SilentTimeout:     30 * time.Second,
+		FirstByteTotal:    5 * time.Second,
+		ASRSilenceTimeout: 5 * time.Second,
+		ASRSpeechTimeout:  800 * time.Millisecond,
+		ASRSpeechMax:      30 * time.Second,
 	}
 }
 
@@ -71,16 +82,22 @@ type Pipeline struct {
 	// to stop FS playback on barge-in. nil-safe (best-effort).
 	ESL bargeESL
 
-	// BargeIn enables the in-Speak monitor. When false, Speak doesn't read
-	// from src at all — caller's audio is buffered in the FIFO until Listen
-	// resumes.
+	// BargeIn enables the in-Speak ASR monitor. When false, Speak doesn't
+	// read from src at all — caller's audio is buffered in the FIFO until
+	// Listen resumes (we drain it during Speak to avoid stale-audio bleed).
 	BargeIn bool
+
+	// BargeMinWords is the threshold of words in a running transcript that
+	// triggers barge-in. Default 3 — short enough to be responsive, long
+	// enough to ignore monosyllabic backchannel ("ờ", "vâng").
+	BargeMinWords int
 
 	Metrics *metrics.Collectors // nil-safe
 
-	// pendingReplay holds caller audio captured during a barge-in to be
-	// replayed into the next Listen call. Cleared by Listen.
-	pendingReplay []byte
+	// pendingTranscript carries the user's text captured by the barge-in
+	// monitor. RunTurn consumes it on the next iteration to skip Listen
+	// entirely (the transcript is already in hand).
+	pendingTranscript string
 
 	// Per-turn outputs of the most recent Speak — read by RunTurn to build
 	// TurnRecord entries for the persistent call history.
@@ -132,41 +149,41 @@ func (p *Pipeline) frameBytes() int {
 	return p.Cfg.SampleRate * 20 / 1000 * 2
 }
 
-// Listen reads audio frames from src, pushes them to ASR (+VAD), and
-// returns the final transcript. Stops when:
+// Listen streams audio frames from src to ASR and returns the final
+// transcript Viettel STT flushes. End-of-utterance detection is delegated
+// to the provider:
 //
-//   - VAD signals SpeechEnd (live mode), OR
+//   - speech_timeout: post-speech trailing silence → IsFinal with text
+//   - silence_timeout: caller never spoke → IsFinal with empty text
+//
+// Master used to layer an energy-based VAD on top of this to "cut sooner",
+// but RMS thresholding on telephony audio (a-law decompressed, handset
+// echo, ambient noise) is brittle and the ASR side already does this with
+// linguistic awareness. We let the provider drive end-of-utterance.
+//
+// VAD is still wired through Pipeline for the barge-in path inside Speak —
+// just not used here.
+//
+// Stops when:
+//   - ASR emits a Result with IsFinal=true (text or empty), OR
 //   - src closes its channel (offline / FIFO peer disconnect), OR
-//   - ASR emits a Result with IsFinal=true, OR
 //   - ctx cancels, OR
-//   - cfg.SilentTimeout elapses with no audio.
+//   - cfg.SilentTimeout elapses (master-side safety cap, > ASR timeouts).
 //
-// Returns ("", nil) if no transcript was produced — caller decides whether
-// to retry or end the call.
+// Returns ("", nil) on empty IsFinal — caller decides whether to re-listen
+// or end the call.
 func (p *Pipeline) Listen(ctx context.Context, src AudioSource) (string, error) {
 	ctx, span := tracer.Start(ctx, "asr.listen", trace.WithAttributes(callAttrs(p.UUID)...))
 	defer span.End()
-
-	// If a barge-in left audio behind, prepend it before reading more from src.
-	if len(p.pendingReplay) > 0 {
-		replay := p.pendingReplay
-		p.pendingReplay = nil
-		span.SetAttributes(attribute.Int("replay.bytes", len(replay)))
-		src = newReplaySource(replay, src, p.frameBytes())
-	}
-
-	if p.VAD != nil {
-		p.VAD.Reset()
-		p.VAD.SetBotSpeaking(false)
-	}
 
 	stream, err := p.ASR.StartStream(ctx, asr.StreamOpts{
 		ConversationID:   p.UUID,
 		SampleRate:       p.Cfg.SampleRate,
 		Channels:         1,
 		SingleSentence:   true,
-		SilenceTimeoutMs: 800,
-		SpeechMaxMs:      30000,
+		SilenceTimeoutMs: int(p.Cfg.ASRSilenceTimeout / time.Millisecond),
+		SpeechTimeoutMs:  int(p.Cfg.ASRSpeechTimeout / time.Millisecond),
+		SpeechMaxMs:      int(p.Cfg.ASRSpeechMax / time.Millisecond),
 	})
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
@@ -195,7 +212,6 @@ func (p *Pipeline) Listen(ctx context.Context, src AudioSource) (string, error) 
 
 	final := ""
 	srcDrained := false
-	speechEnded := false
 
 readLoop:
 	for {
@@ -219,22 +235,12 @@ readLoop:
 				closeSend()
 				break readLoop
 			}
-			if p.VAD != nil {
-				if e := p.VAD.Push(frame); e == vad.EventSpeechEnd {
-					speechEnded = true
-				}
-			}
 			if err := stream.SendAudio(frame); err != nil {
 				if errors.Is(err, io.EOF) {
 					break readLoop
 				}
 				span.SetStatus(codes.Error, err.Error())
 				return "", fmt.Errorf("asr send: %w", err)
-			}
-			if speechEnded {
-				addEventMs(span, "vad_speech_end", time.Since(startedAt).Milliseconds())
-				closeSend()
-				break readLoop
 			}
 
 		case res, ok := <-stream.Recv():
@@ -285,7 +291,6 @@ drainLoop:
 	span.SetAttributes(
 		attribute.Int("transcript.len", len(final)),
 		attribute.Bool("src.eof", srcDrained),
-		attribute.Bool("vad.speech_end", speechEnded),
 	)
 	addEventMs(span, "final_transcript", totalMs.Milliseconds(),
 		attribute.Int("text_len", len(final)))
@@ -293,9 +298,8 @@ drainLoop:
 	slog.Info("pipeline.listen done",
 		"call_uuid", p.UUID,
 		"transcript", final,
-		"asr_ms", time.Since(startedAt).Milliseconds(),
+		"asr_ms", totalMs.Milliseconds(),
 		"src_eof", srcDrained,
-		"vad_end", speechEnded,
 	)
 	return final, nil
 }
@@ -309,7 +313,8 @@ drainLoop:
 // When src is non-nil and p.BargeIn is true, a barge-in monitor reads audio
 // during bot speaking; on detected user speech, the bot stream + TTS are
 // canceled, FS playback is broken, and Speak returns ActionChat early.
-// The captured audio is stashed in p.pendingReplay for the next Listen.
+// The captured transcript is stashed in p.pendingTranscript for RunTurn
+// to feed into the next Speak directly (no follow-up Listen needed).
 func (p *Pipeline) Speak(ctx context.Context, src AudioSource, sink AudioSink, message string) (bot.Action, error) {
 	startedAt := time.Now()
 
@@ -324,49 +329,46 @@ func (p *Pipeline) Speak(ctx context.Context, src AudioSource, sink AudioSink, m
 	botSpan.SetAttributes(attribute.Int("message.len", len(message)))
 	defer botSpan.End()
 
-	// Spawn the barge-in monitor BEFORE bot/tts setup so VAD's BotSpeaking
-	// flag is set while audio is still being TTS'd. Monitor lifecycle is
-	// bound to Speak's defer chain.
+	// Spawn the barge-in monitor BEFORE bot/tts setup so the ASR session
+	// is ingesting frames the moment the caller can hear the bot. Monitor
+	// lifetime is bound to Speak's defer chain.
+	//
+	// When barge-in is off but src is wired, we still drain frames into
+	// /dev/null — leaving them in the FIFO would pile up TTS-echo audio
+	// and corrupt the next Listen with stale data ("bot repeats the same
+	// line" failure mode).
 	var monitor *bargeInMonitor
-	bargeEnabled := p.BargeIn && src != nil && p.VAD != nil
+	bargeEnabled := p.BargeIn && src != nil && p.ASR != nil
 	if bargeEnabled {
-		monitor = newBargeInMonitor(p.UUID, p.VAD, src, 32000) // ~2s @ 8k S16LE
-		monitor.start(ctx)
-		defer monitor.stop()
-	} else {
-		if p.VAD != nil {
-			// Mark bot-speaking so the next Listen.Reset is a clean slate.
-			p.VAD.SetBotSpeaking(true)
-			defer p.VAD.SetBotSpeaking(false)
+		m, err := newBargeInMonitor(ctx, p.UUID, p.ASR, src, p.BargeMinWords, p.Cfg)
+		if err != nil {
+			slog.Warn("bargein monitor init failed; falling back to drain-only",
+				"call_uuid", p.UUID, "err", err)
+		} else {
+			monitor = m
+			defer monitor.stop()
 		}
-		// Drain caller audio while we're speaking so it doesn't pile up in
-		// the FIFO. Otherwise the next Listen reads stale frames (bot's
-		// own TTS echoed back through the handset) — ASR finalizes them
-		// as empty transcripts and the bot keeps replying to silence,
-		// creating the "bot repeats the same line" loop. We discard here
-		// because barge-in is off; live VAD-driven interrupt is the
-		// barge-in path above.
-		if src != nil {
-			drainStop := make(chan struct{})
-			drainDone := make(chan struct{})
-			go func() {
-				defer close(drainDone)
-				for {
-					select {
-					case <-drainStop:
+	}
+	if monitor == nil && src != nil {
+		drainStop := make(chan struct{})
+		drainDone := make(chan struct{})
+		go func() {
+			defer close(drainDone)
+			for {
+				select {
+				case <-drainStop:
+					return
+				case _, ok := <-src.Frames():
+					if !ok {
 						return
-					case _, ok := <-src.Frames():
-						if !ok {
-							return
-						}
 					}
 				}
-			}()
-			defer func() {
-				close(drainStop)
-				<-drainDone
-			}()
-		}
+			}
+		}()
+		defer func() {
+			close(drainStop)
+			<-drainDone
+		}()
 	}
 
 	turnStream, err := p.Bot.Stream(botCtx, p.UUID, message)
@@ -520,12 +522,15 @@ func (p *Pipeline) Speak(ctx context.Context, src AudioSource, sink AudioSink, m
 	recordStage(p.Metrics, "bot.total", p.Scenario, botTotal.Seconds())
 
 	// On barge-in, force action to CHAT (caller wants to talk) and stash
-	// the captured audio for the next Listen call. ENDCALL is preserved if
-	// somehow the bot finished and emitted ENDCALL before we triggered.
-	if bargeFired {
-		monitor.stop() // ensure ring is stable
-		p.pendingReplay = monitor.snapshot()
-		botSpan.SetAttributes(attribute.Int("barge_in.replay_bytes", len(p.pendingReplay)))
+	// the captured transcript for RunTurn to feed into the next Speak call
+	// — no follow-up Listen is needed. ENDCALL is preserved if somehow
+	// the bot finished and emitted ENDCALL before we triggered.
+	if bargeFired && monitor != nil {
+		monitor.stop()
+		p.pendingTranscript = monitor.capturedTranscript()
+		botSpan.SetAttributes(
+			attribute.Int("barge_in.transcript_words", countWords(p.pendingTranscript)),
+		)
 		if action != bot.ActionEndCall {
 			action = bot.ActionChat
 		}
@@ -572,10 +577,20 @@ func (p *Pipeline) Speak(ctx context.Context, src AudioSource, sink AudioSink, m
 // Calling the bot with "" makes it emit the greeting fallback every turn,
 // which manifests as "the bot keeps repeating the same line." We loop
 // back to Listen so the next caller utterance gets a real reply.
+//
+// If a barge-in fired in the previous Speak, the captured transcript is
+// already in p.pendingTranscript — skip Listen and feed it straight to
+// Speak.
 func (p *Pipeline) RunTurn(ctx context.Context, src AudioSource, sink AudioSink) (bool, error) {
 	turnStart := time.Now()
 	var transcript string
-	if src != nil {
+	switch {
+	case p.pendingTranscript != "":
+		transcript = p.pendingTranscript
+		p.pendingTranscript = ""
+		slog.Info("pipeline.turn using barge-in transcript",
+			"call_uuid", p.UUID, "transcript", transcript)
+	case src != nil:
 		t, err := p.Listen(ctx, src)
 		if err != nil {
 			return false, err
