@@ -546,6 +546,32 @@ func (p *Pipeline) Speak(ctx context.Context, src AudioSource, sink AudioSink, m
 	ttsSpan.SetAttributes(attribute.Int("audio.bytes", bytesOut))
 	recordStage(p.Metrics, "tts.total", p.Scenario, time.Since(startedAt).Seconds())
 
+	// TTS streams audio faster than realtime — for a 5s greeting we
+	// often finish writing in <200ms and Speak would return immediately,
+	// while FS keeps draining the FIFO at 16 kB/s (8 kHz × 2 bytes). If
+	// we let the next Listen open right away, ASR captures the bot's own
+	// voice echoing back through the handset and (a) finalizes empty
+	// transcripts that re-trigger the bot's greeting fallback, or (b)
+	// trips barge-in on the bot itself. Block here until the buffered
+	// audio has actually been played out at the caller's ear.
+	//
+	// Skipped on barge-in (the playback was already broken by uuid_break)
+	// and when no audio was produced (greeting failures, ENDCALL with no
+	// reply text).
+	if !bargeFired && bytesOut > 0 && firstAudioAt > 0 {
+		audioDur := time.Duration(bytesOut/16) * time.Millisecond
+		audioElapsed := time.Since(startedAt) - firstAudioAt
+		if remaining := audioDur - audioElapsed; remaining > 0 {
+			ttsSpan.AddEvent("playback_drain_wait",
+				trace.WithAttributes(attribute.Int64("wait_ms", remaining.Milliseconds())))
+			select {
+			case <-time.After(remaining):
+			case <-ctx.Done():
+				return action, ctx.Err()
+			}
+		}
+	}
+
 	// Stash for RunTurn → call history. botTextMu held to avoid racing
 	// with the sentence-pump goroutine (which exited at sentencesDone but
 	// the buffer is still touched by the closure scope).
