@@ -49,12 +49,13 @@ type SessionRunner struct {
 	Metrics       *metrics.Collectors // nil-safe
 	Store        CallStore           // nil-safe — when set, every call is persisted at end of Run
 
-	// playbackStops maps a call uuid to the ACTIVE utterance's done-channel.
-	// makePlaybackOpener stores a fresh chan per utterance; the global
-	// PLAYBACK_STOP handler closes whatever is currently parked here so
-	// Speak unblocks the moment FS finishes draining its internal jitter
-	// buffer (audio-bytes/16 sleep alone overshoots by ~1 s).
-	playbackStops sync.Map // uuid → chan struct{}
+	// playbackStops maps a FIFO path → *playbackHandle for the in-flight
+	// utterance on that path. We key by FULL PATH (not uuid) because FS
+	// emits PLAYBACK_STOP with the file path in Application-Data, and a
+	// stale PLAYBACK_STOP from a previous utterance must not signal the
+	// next one. signalDone is sync.Once-guarded so duplicate events or
+	// timeout-then-late-event sequences don't panic.
+	playbackStops sync.Map // path → *playbackHandle
 	registerOnce  sync.Once
 }
 
@@ -67,22 +68,23 @@ func (r *SessionRunner) RegisterESLHandlers() {
 }
 
 func (r *SessionRunner) onPlaybackStop(ev *eventsocket.Event) {
-	uuid := ev.Get("Unique-Id")
-	if uuid == "" {
+	// Match by FILE PATH, not call uuid. Multiple utterances on the same
+	// channel produce multiple PLAYBACK_STOP events and we need to know
+	// which one finished. FS sets Application-Data to the playback path
+	// (and "Playback-File-Path" on some versions); we try both.
+	path := ev.Get("Application-Data")
+	if path == "" {
+		path = ev.Get("Playback-File-Path")
+	}
+	if path == "" {
 		return
 	}
-	v, ok := r.playbackStops.LoadAndDelete(uuid)
+	v, ok := r.playbackStops.LoadAndDelete(path)
 	if !ok {
 		return
 	}
-	if ch, ok := v.(chan struct{}); ok {
-		// guarded close — handler may fire after our own Close()
-		select {
-		case <-ch:
-			// already closed
-		default:
-			close(ch)
-		}
+	if h, ok := v.(*playbackHandle); ok {
+		h.signalDone()
 	}
 }
 
@@ -105,36 +107,35 @@ func (r *SessionRunner) makePlaybackOpener(uuid string, logger *slog.Logger) Pla
 			return nil, fmt.Errorf("mkfifo %s: %w", path, err)
 		}
 
-		// Pre-arm the PLAYBACK_STOP signal BEFORE issuing uuid_broadcast.
-		// FS only emits one PLAYBACK_STOP per uuid_broadcast — racing the
-		// register would be brittle. The handler LoadAndDeletes the chan,
-		// so any prior leftover from a previous utterance is cleared.
-		stopCh := make(chan struct{})
-		r.playbackStops.Store(uuid, stopCh)
+		// Build the handle first so we can register it under the FIFO
+		// path BEFORE issuing uuid_broadcast — otherwise a fast FS
+		// could race PLAYBACK_STOP ahead of our Store.
+		h := &playbackHandle{
+			path:   path,
+			uuid:   uuid,
+			logger: logger,
+			done:   make(chan struct{}),
+			runner: r,
+		}
+		r.playbackStops.Store(path, h)
 
 		// uuid_broadcast must happen BEFORE OpenFIFOForWrite so FS attaches
 		// the read side and the open(O_WRONLY) unblocks.
 		if err := r.ESL.PlayAudio(uuid, path); err != nil {
-			r.playbackStops.Delete(uuid)
+			r.playbackStops.Delete(path)
 			_ = os.Remove(path)
 			return nil, fmt.Errorf("uuid_broadcast: %w", err)
 		}
 		f, err := audio.OpenFIFOForWrite(path)
 		if err != nil {
-			r.playbackStops.Delete(uuid)
+			r.playbackStops.Delete(path)
 			_ = os.Remove(path)
 			return nil, err
 		}
+		h.f = f
 		logger.Debug("playback opened",
 			"call_uuid", uuid, "path", path, "utt", n)
-		return &playbackHandle{
-			f:      f,
-			path:   path,
-			uuid:   uuid,
-			logger: logger,
-			done:   stopCh,
-			runner: r,
-		}, nil
+		return h, nil
 	}
 }
 
@@ -144,18 +145,25 @@ func (r *SessionRunner) makePlaybackOpener(uuid string, logger *slog.Logger) Pla
 // writing — those moments are ~1 s apart due to the kernel pipe buffer +
 // FS's internal jitter buffer).
 type playbackHandle struct {
-	f      *os.File
-	path   string
-	uuid   string
-	logger *slog.Logger
-	done   chan struct{}
-	runner *SessionRunner
-	closed atomicBool
+	f        *os.File
+	path     string
+	uuid     string
+	logger   *slog.Logger
+	done     chan struct{}
+	doneOnce sync.Once
+	runner   *SessionRunner
+	closed   atomicBool
 }
 
 // Done returns the playback-complete signal; reading from a closed chan
 // is non-blocking, so callers can use it in a select with a timeout.
 func (h *playbackHandle) Done() <-chan struct{} { return h.done }
+
+// signalDone closes h.done exactly once. Safe to call from the
+// PLAYBACK_STOP handler and from Close().
+func (h *playbackHandle) signalDone() {
+	h.doneOnce.Do(func() { close(h.done) })
+}
 
 type atomicBool struct{ v int32 }
 
@@ -176,13 +184,12 @@ func (h *playbackHandle) Close() error {
 	if !h.closed.cas(false, true) {
 		return nil
 	}
+	// Close the FIFO write side so FS reads EOF and can finish its
+	// playback. We do NOT remove the playbackStops entry here — that
+	// belongs to the PLAYBACK_STOP handler, which needs to find this
+	// handle to signal Done(). If PLAYBACK_STOP never arrives the
+	// caller's select fires its timeout branch instead.
 	closeErr := h.f.Close()
-	// If PLAYBACK_STOP hasn't fired yet (rare), evict the entry so we
-	// don't leak the chan. The handler also LoadAndDeletes, so this is
-	// just defensive.
-	if h.runner != nil {
-		h.runner.playbackStops.Delete(h.uuid)
-	}
 	if err := os.Remove(h.path); err != nil && !os.IsNotExist(err) {
 		h.logger.Debug("playback fifo cleanup failed",
 			"call_uuid", h.uuid, "path", h.path, "err", err)
