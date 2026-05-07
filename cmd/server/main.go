@@ -274,9 +274,10 @@ func main() {
 	api.RegisterCalls(router.Mux(), api.CallsDeps{Store: callReader})
 
 	if pgStore != nil {
-		api.RegisterBots(router.Mux(), api.BotsDeps{Store: pgStore})
-		api.RegisterTenants(router.Mux(), api.TenantsDeps{Store: pgStore})
-		api.RegisterUsers(router.Mux(), api.UsersDeps{Store: pgStore})
+		api.RegisterBots(router.Mux(), api.BotsDeps{Store: pgStore, Auditor: pgStore})
+		api.RegisterTenants(router.Mux(), api.TenantsDeps{Store: pgStore, Auditor: pgStore})
+		api.RegisterUsers(router.Mux(), api.UsersDeps{Store: pgStore, Auditor: pgStore})
+		api.RegisterAudit(router.Mux(), api.AuditDeps{Store: pgStore})
 	} else {
 		api.RegisterBots(router.Mux(), api.BotsDeps{}) // 503 stubs
 	}

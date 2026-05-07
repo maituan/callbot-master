@@ -15,7 +15,8 @@ import (
 
 // UsersDeps wires /api/v1/users.
 type UsersDeps struct {
-	Store UserStore
+	Store   UserStore
+	Auditor AuditWriter
 }
 
 type UserStore interface {
@@ -152,6 +153,8 @@ func (h *usersHandler) create(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	recordAudit(h.d.Auditor, r, &tid, "user.create", "user", uid.String(), nil,
+		map[string]any{"username": body.Username, "tenant_id": tid})
 	writeJSON(w, http.StatusCreated, map[string]any{"id": uid, "username": body.Username})
 }
 
@@ -178,6 +181,8 @@ func (h *usersHandler) update(w http.ResponseWriter, r *http.Request, id uuid.UU
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	recordAudit(h.d.Auditor, r, nil, "user.update", "user", id.String(), nil,
+		map[string]any{"enabled": *body.Enabled})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -201,6 +206,7 @@ func (h *usersHandler) delete(w http.ResponseWriter, r *http.Request, id uuid.UU
 		}
 		return
 	}
+	recordAudit(h.d.Auditor, r, nil, "user.delete", "user", id.String(), nil, nil)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -230,6 +236,7 @@ func (h *usersHandler) adminResetPassword(w http.ResponseWriter, r *http.Request
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	recordAudit(h.d.Auditor, r, nil, "user.password_admin_reset", "user", id.String(), nil, nil)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -271,6 +278,7 @@ func (h *usersHandler) changeOwnPassword(w http.ResponseWriter, r *http.Request)
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	recordAudit(h.d.Auditor, r, u.TenantID, "user.password_self_change", "user", u.ID.String(), nil, nil)
 	w.WriteHeader(http.StatusNoContent)
 }
 

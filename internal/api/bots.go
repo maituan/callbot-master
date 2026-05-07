@@ -18,9 +18,11 @@ import (
 )
 
 // BotsDeps wires the bot CRUD endpoints. Store must implement the bot
-// CRUD slice; without it the routes return 503.
+// CRUD slice; without it the routes return 503. Auditor is optional —
+// when set, every mutation gets an audit_log row.
 type BotsDeps struct {
-	Store BotStore
+	Store   BotStore
+	Auditor AuditWriter
 }
 
 // BotStore is the slice of *store.Postgres the bot API needs. Letting
@@ -198,6 +200,9 @@ func (h *botsHandler) create(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "create bot: "+err.Error())
 		return
 	}
+	recordAudit(h.d.Auditor, r, &tenantID, "bot.create", "bot", newID.String(), nil, map[string]any{
+		"slug": in.Slug, "name": in.Name, "tenant_id": tenantID,
+	})
 	writeJSON(w, http.StatusCreated, map[string]any{"id": newID})
 }
 
@@ -243,6 +248,9 @@ func (h *botsHandler) update(w http.ResponseWriter, r *http.Request, botID uuid.
 		writeJSONError(w, http.StatusInternalServerError, "update bot: "+err.Error())
 		return
 	}
+	recordAudit(h.d.Auditor, r, &existing.TenantID, "bot.update", "bot", botID.String(),
+		botSummary(existing),
+		map[string]any{"slug": in.Slug, "name": in.Name, "enabled": in.Enabled, "bot_url": in.BotURL})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -264,6 +272,7 @@ func (h *botsHandler) delete(w http.ResponseWriter, r *http.Request, botID uuid.
 		writeJSONError(w, http.StatusInternalServerError, "delete: "+err.Error())
 		return
 	}
+	recordAudit(h.d.Auditor, r, &bot.TenantID, "bot.delete", "bot", botID.String(), botSummary(bot), nil)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -318,6 +327,8 @@ func (h *botsHandler) addDID(w http.ResponseWriter, r *http.Request, botID uuid.
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	recordAudit(h.d.Auditor, r, &bot.TenantID, "did.add", "did", body.DID, nil,
+		map[string]any{"did": body.DID, "bot_id": botID, "bot_slug": bot.Slug})
 	writeJSON(w, http.StatusCreated, map[string]any{"did": body.DID})
 }
 
@@ -335,6 +346,8 @@ func (h *botsHandler) removeDID(w http.ResponseWriter, r *http.Request, botID uu
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	recordAudit(h.d.Auditor, r, &bot.TenantID, "did.remove", "did", did,
+		map[string]any{"did": did, "bot_id": botID, "bot_slug": bot.Slug}, nil)
 	w.WriteHeader(http.StatusNoContent)
 }
 

@@ -16,7 +16,8 @@ import (
 // TenantsDeps wires the /api/v1/tenants endpoints. Mutating endpoints
 // require platform_admin; read returns scoped data.
 type TenantsDeps struct {
-	Store TenantStore
+	Store   TenantStore
+	Auditor AuditWriter
 }
 
 type TenantStore interface {
@@ -152,6 +153,8 @@ func (h *tenantsHandler) create(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	recordAudit(h.d.Auditor, r, &tid, "tenant.create", "tenant", tid.String(), nil,
+		map[string]any{"slug": body.Slug, "name": body.Name})
 	writeJSON(w, http.StatusCreated, map[string]any{"id": tid, "slug": body.Slug, "name": body.Name})
 }
 
@@ -183,6 +186,8 @@ func (h *tenantsHandler) update(w http.ResponseWriter, r *http.Request, id uuid.
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	recordAudit(h.d.Auditor, r, &id, "tenant.update", "tenant", id.String(), nil,
+		map[string]any{"name": body.Name, "enabled": enabled})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -201,6 +206,7 @@ func (h *tenantsHandler) delete(w http.ResponseWriter, r *http.Request, id uuid.
 		}
 		return
 	}
+	recordAudit(h.d.Auditor, r, &id, "tenant.delete", "tenant", id.String(), nil, nil)
 	w.WriteHeader(http.StatusNoContent)
 }
 
