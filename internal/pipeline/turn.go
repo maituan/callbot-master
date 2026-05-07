@@ -544,8 +544,13 @@ func (p *Pipeline) Speak(ctx context.Context, src AudioSource, sinkArg AudioSink
 	bargeFired := false
 
 	// triggerBargeIn collapses the barge-in chain (close TTS, uuid_break,
-	// cancel bot) and metric increment into one place. Returns true if
-	// this call actually fired (CompareAndSwap on bargeFired).
+	// cancel bot, capture transcript, increment metric) into one place.
+	// Idempotent: subsequent calls are no-ops.
+	//
+	// pendingTranscript is set HERE (not in a post-flow check) so the
+	// next RunTurn picks it up regardless of which Speak phase the
+	// bargein fired in — main select, post-actionCh check, audio drain,
+	// or playback wait.
 	triggerBargeIn := func() {
 		if bargeFired {
 			return
@@ -559,6 +564,10 @@ func (p *Pipeline) Speak(ctx context.Context, src AudioSource, sinkArg AudioSink
 			}
 		}
 		cancelBot()
+		if monitor != nil {
+			monitor.stop()
+			p.pendingTranscript = monitor.capturedTranscript()
+		}
 		if p.Metrics != nil {
 			p.Metrics.BargeInTotal.WithLabelValues(p.Scenario).Inc()
 		}
@@ -601,27 +610,27 @@ func (p *Pipeline) Speak(ctx context.Context, src AudioSource, sinkArg AudioSink
 	)
 	recordStage(p.Metrics, "bot.total", p.Scenario, botTotal.Seconds())
 
-	// On barge-in, force action to CHAT (caller wants to talk) and stash
-	// the captured transcript for RunTurn to feed into the next Speak call
-	// — no follow-up Listen is needed. ENDCALL is preserved if somehow
-	// the bot finished and emitted ENDCALL before we triggered.
-	if bargeFired && monitor != nil {
-		monitor.stop()
-		p.pendingTranscript = monitor.capturedTranscript()
-		botSpan.SetAttributes(
-			attribute.Int("barge_in.transcript_words", countWords(p.pendingTranscript)),
-		)
-		if action != bot.ActionEndCall {
-			action = bot.ActionChat
+	// Wait for TTS to drain — but check the bargein trigger here too.
+	// Bot's HTTP stream often finishes seconds before FS finishes playing
+	// the resulting audio (text streams in <1 s, FS plays at realtime).
+	// While we're parked on <-audioErr, the caller could start barging
+	// in and we'd otherwise miss it for the entire drain duration.
+	audioWait:
+	for {
+		select {
+		case err := <-audioErr:
+			if err != nil {
+				slog.Warn("pipeline.speak audio drain", "call_uuid", p.UUID, "err", err)
+				ttsSpan.RecordError(err)
+				incTTSErr(p.Metrics, "audio_drain")
+			}
+			break audioWait
+		case <-bargeTriggerChan(monitor):
+			// Triggers the chain; idempotent. Loop back to drain audioErr.
+			triggerBargeIn()
+		case <-ctx.Done():
+			return action, ctx.Err()
 		}
-	}
-
-	// Wait for TTS to drain. We don't add a hard deadline beyond ctx because
-	// callers usually wrap with a turn-level timeout.
-	if err := <-audioErr; err != nil {
-		slog.Warn("pipeline.speak audio drain", "call_uuid", p.UUID, "err", err)
-		ttsSpan.RecordError(err)
-		incTTSErr(p.Metrics, "audio_drain")
 	}
 	ttsSpan.SetAttributes(attribute.Int("audio.bytes", bytesOut))
 	recordStage(p.Metrics, "tts.total", p.Scenario, time.Since(startedAt).Seconds())
@@ -668,6 +677,21 @@ func (p *Pipeline) Speak(ctx context.Context, src AudioSource, sinkArg AudioSink
 			case <-ctx.Done():
 				return action, ctx.Err()
 			}
+		}
+	}
+
+	// Final barge-in post-processing — runs AFTER all possible trigger
+	// points (main select, audio drain, playback wait). The closure has
+	// already set p.pendingTranscript synchronously when fired; here we
+	// just override action and decorate the span. ENDCALL wins over CHAT
+	// in the rare race where the bot finished + emitted ENDCALL before
+	// the trigger actually closed the chain.
+	if bargeFired {
+		botSpan.SetAttributes(
+			attribute.Int("barge_in.transcript_words", countWords(p.pendingTranscript)),
+		)
+		if action != bot.ActionEndCall {
+			action = bot.ActionChat
 		}
 	}
 
