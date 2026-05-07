@@ -19,18 +19,16 @@ import (
 
 	"callbot-master/config"
 	"callbot-master/internal/api"
-	"callbot-master/internal/asr"
 	"callbot-master/internal/auth"
-	"callbot-master/internal/bot"
 	"callbot-master/internal/campaign"
 	"callbot-master/internal/freeswitch"
 	"callbot-master/internal/metrics"
 	"callbot-master/internal/pipeline"
 	"callbot-master/internal/recording"
+	"callbot-master/internal/registry"
 	"callbot-master/internal/session"
 	"callbot-master/internal/store"
 	"callbot-master/internal/telemetry"
-	"callbot-master/internal/tts"
 	"callbot-master/internal/vad"
 )
 
@@ -120,19 +118,52 @@ func main() {
 		slog.Warn("MASTER_JWT_SECRET not set — auth disabled, /api/v1/auth/* will 503")
 	}
 
-	// Provider clients. ASR dial happens here; TTS+bot are lazy per-call.
-	asrClient, err := asr.NewViettelClient(rootCtx, cfg.ASR.Endpoint, cfg.ASR.Token)
-	if err != nil {
-		slog.Error("asr client init failed", "err", err)
-		os.Exit(1)
-	}
-	defer asrClient.Close()
+	// Provider registry: pools ASR gRPC connections by (endpoint, token);
+	// TTS + Bot clients are constructed fresh per call. The previous
+	// architecture wired one ASR/TTS/Bot singleton from env; this is what
+	// made true multi-bot impossible. Now registry.For(*BotConfig) is the
+	// only place providers come from.
+	provReg := registry.New()
+	defer provReg.Close()
 
-	ttsClient := tts.NewViettelClient(
-		cfg.TTS.Endpoint, cfg.TTS.Token, cfg.TTS.VoiceID,
-		cfg.TTS.ResampleRate, cfg.TTS.Tempo,
-	)
-	botClient := bot.NewHTTPClient(cfg.Bot.URL, cfg.Bot.FirstByteTimeout, cfg.Bot.TotalTimeout)
+	// Bootstrap a default bot from env when the DB is empty. Lets a fresh
+	// install boot with the same env it used pre-multi-tenant; once an
+	// admin creates real bots in the UI, this branch is a no-op.
+	if pgStore != nil {
+		if n, err := pgStore.CountBots(rootCtx); err != nil {
+			slog.Error("count bots", "err", err)
+			os.Exit(1)
+		} else if n == 0 {
+			botID, err := pgStore.SeedDefaultBot(rootCtx, store.SeedBotInput{
+				TenantSlug:            "hcc",
+				TenantName:            "Hành chính công",
+				BotSlug:               "hcc-default",
+				BotName:               "HCC default bot",
+				DID:                   cfg.Inbound.DID,
+				BotURL:                cfg.Bot.URL,
+				BotFirstByteTimeoutMs: int(cfg.Bot.FirstByteTimeout / time.Millisecond),
+				BotTotalTimeoutMs:     int(cfg.Bot.TotalTimeout / time.Millisecond),
+				ASREndpoint:           cfg.ASR.Endpoint,
+				ASRToken:              cfg.ASR.Token,
+				TTSEndpoint:           cfg.TTS.Endpoint,
+				TTSToken:              cfg.TTS.Token,
+				TTSVoiceID:            cfg.TTS.VoiceID,
+				TTSTempo:              cfg.TTS.Tempo,
+				ASRSilenceTimeoutSec:  int(cfg.ASR.SilenceTimeout / time.Second),
+				ASRSpeechTimeoutSec:   int(cfg.ASR.SpeechTimeout / time.Second),
+				ASRSpeechMaxSec:       int(cfg.ASR.SpeechMax / time.Second),
+				BargeInEnabled:        cfg.BargeIn.Enabled,
+				BargeInMinWords:       cfg.BargeIn.MinWords,
+				FillerEnabled:         cfg.Filler.Enabled,
+			})
+			if err != nil {
+				slog.Error("seed default bot", "err", err)
+				os.Exit(1)
+			}
+			slog.Info("seeded default bot from env",
+				"bot_id", botID, "tenant", "hcc", "did", cfg.Inbound.DID)
+		}
+	}
 
 	// FreeSWITCH ESL — maintainConnection() reconnects in the background.
 	esl, err := freeswitch.NewEventSocket(&cfg.FreeSWITCH)
@@ -156,17 +187,12 @@ func main() {
 	runner := &pipeline.SessionRunner{
 		ESL:          esl,
 		Sessions:     manager,
-		ASR:          asrClient,
-		TTS:          ttsClient,
-		Bot:          botClient,
 		NewVAD:       func() vad.Detector { return vad.NewEnergy(vadConfigFromCfg(cfg.VAD)) },
 		RecordingDir: cfg.Audio.RecordingsDir,
 		TTSDir:       cfg.Audio.TTSDir,
 		FrameBytes:   cfg.Audio.FrameSamples * 2, // S16LE → 2 bytes per sample
 		PipelineCfg:  pCfg,
-		BargeIn:       cfg.BargeIn.Enabled,
-		BargeMinWords: cfg.BargeIn.MinWords,
-		Metrics:       mc,
+		Metrics:      mc,
 	}
 	if pgStore != nil {
 		runner.Store = pgStore
@@ -199,16 +225,21 @@ func main() {
 	// playing each utterance.
 	runner.RegisterESLHandlers()
 
+	if pgStore == nil {
+		slog.Error("pgStore is required for multi-tenant routing — set MASTER_PG_DSN")
+		os.Exit(1)
+	}
 	inbound := pipeline.NewInboundHandler(rootCtx, pipeline.InboundDeps{
 		Runner:    runner,
-		DID:       cfg.Inbound.DID,
+		Resolver:  pgStore,
+		Registry:  provReg,
 		PickupSLA: cfg.Inbound.PickupTimeout,
-		Scenario:  cfg.Inbound.Scenario,
 	})
 	inbound.Register()
 
 	outbound := pipeline.NewOutboundHandler(rootCtx, pipeline.OutboundDeps{
-		Runner: runner,
+		Runner:   runner,
+		Registry: provReg,
 	})
 	outbound.Register()
 
@@ -229,10 +260,12 @@ func main() {
 		api.RegisterAuth(router.Mux(), api.AuthDeps{}) // mounts 503 stubs
 	}
 	api.RegisterCampaigns(router.Mux(), api.CampaignDeps{
-		Manager:         campaigns,
-		BindFunc:        outbound.MakeCampaignOriginateFuncWithManager,
-		DefaultScenario: cfg.Inbound.Scenario,
-		DefaultCallerID: "callbot",
+		Manager:           campaigns,
+		BindFunc:          outbound.MakeCampaignOriginateFuncWithManager,
+		BotLookup:         pgStore,
+		DefaultTenantSlug: "hcc",
+		DefaultBotSlug:    "hcc-default",
+		DefaultCallerID:   "callbot",
 	})
 	var callReader api.CallReader
 	if pgStore != nil {

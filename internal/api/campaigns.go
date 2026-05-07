@@ -9,30 +9,43 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/google/uuid"
+
 	"callbot-master/internal/campaign"
+	"callbot-master/internal/store"
 )
 
 // CampaignDeps wires the API to the campaign manager + outbound originate.
 // The originate function is provided by pipeline.OutboundHandler. BindFunc
-// receives both the manager (so metric updates flow through it) and the
-// campaign pointer (for status callbacks).
+// receives the manager + campaign + the resolved bot snapshot used for
+// every lead in this campaign.
 type CampaignDeps struct {
 	Manager  *campaign.Manager
-	BindFunc func(*campaign.Manager, *campaign.Campaign) campaign.OriginateFunc
-	// DefaultScenario / DefaultCallerID fill in fields the form omits.
-	DefaultScenario string
-	DefaultCallerID string
+	BindFunc func(*campaign.Manager, *campaign.Campaign, *store.BotConfig) campaign.OriginateFunc
+	// BotLookup resolves a bot by id or slug at campaign create time.
+	// At least one of ByID / BySlug must be provided; the API returns
+	// 503 otherwise.
+	BotLookup BotLookup
+	// DefaultBotSlug + DefaultTenantSlug let legacy callers (curl
+	// scripts) skip the bot fields entirely.
+	DefaultTenantSlug string
+	DefaultBotSlug    string
+	DefaultCallerID   string
 	// MaxUploadBytes caps multipart parsing (CSV size). 32MB default.
 	MaxUploadBytes int64
+}
+
+// BotLookup is the slice of store.Postgres campaign create needs.
+type BotLookup interface {
+	GetBotByID(ctx context.Context, id uuid.UUID) (*store.BotConfig, error)
+	GetTenantBySlug(ctx context.Context, slug string) (*store.Tenant, error)
+	GetBotByTenantAndSlug(ctx context.Context, tenantID uuid.UUID, slug string) (*store.BotConfig, error)
 }
 
 // RegisterCampaigns mounts /api/v1/campaigns routes on the given mux.
 func RegisterCampaigns(mux *http.ServeMux, d CampaignDeps) {
 	if d.MaxUploadBytes <= 0 {
 		d.MaxUploadBytes = 32 << 20
-	}
-	if d.DefaultScenario == "" {
-		d.DefaultScenario = "default"
 	}
 	if d.DefaultCallerID == "" {
 		d.DefaultCallerID = "callbot"
@@ -153,9 +166,18 @@ func (h *campaignHandler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	scenario := r.FormValue("scenario")
-	if scenario == "" {
-		scenario = h.d.DefaultScenario
+	if h.d.BotLookup == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "bot lookup not wired")
+		return
+	}
+	bot, err := h.resolveBot(r)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if bot == nil {
+		writeJSONError(w, http.StatusNotFound, "bot not found")
+		return
 	}
 	callerID := r.FormValue("caller_id")
 	if callerID == "" {
@@ -194,26 +216,66 @@ func (h *campaignHandler) create(w http.ResponseWriter, r *http.Request) {
 	var c *campaign.Campaign
 	var bound campaign.OriginateFunc
 	c = h.d.Manager.Create(context.Background(), campaign.CreateOpts{
-		Scenario: scenario,
+		Scenario: bot.Slug,
 		CallerID: callerID,
 		CCU:      ccu,
 		Leads:    leads,
 	}, func(ctx context.Context, phone, cid, sc string, cd map[string]any) (string, error) {
 		if bound == nil {
-			bound = h.d.BindFunc(h.d.Manager, c)
+			bound = h.d.BindFunc(h.d.Manager, c, bot)
 		}
 		return bound(ctx, phone, cid, sc, cd)
 	})
 
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"id":         c.ID,
-		"status":     c.Status,
-		"total":      len(leads),
-		"scenario":   scenario,
-		"caller_id":  callerID,
-		"ccu":        ccu,
-		"created_at": c.CreatedAt,
+		"id":          c.ID,
+		"status":      c.Status,
+		"total":       len(leads),
+		"bot_id":      bot.ID,
+		"bot_slug":    bot.Slug,
+		"tenant_slug": bot.TenantSlug,
+		"caller_id":   callerID,
+		"ccu":         ccu,
+		"created_at":  c.CreatedAt,
 	})
+}
+
+// resolveBot picks the bot for a campaign create request. Precedence:
+//   1. bot_id (UUID) — exact lookup
+//   2. bot_slug + tenant_slug (or DefaultTenantSlug)
+//   3. DefaultBotSlug under DefaultTenantSlug — legacy fallback
+func (h *campaignHandler) resolveBot(r *http.Request) (*store.BotConfig, error) {
+	ctx := r.Context()
+	if v := r.FormValue("bot_id"); v != "" {
+		id, err := uuid.Parse(v)
+		if err != nil {
+			return nil, fmt.Errorf("bot_id: %w", err)
+		}
+		return h.d.BotLookup.GetBotByID(ctx, id)
+	}
+	tenantSlug := r.FormValue("tenant_slug")
+	if tenantSlug == "" {
+		tenantSlug = h.d.DefaultTenantSlug
+	}
+	botSlug := r.FormValue("bot_slug")
+	if botSlug == "" {
+		// Legacy alias: campaigns used to take "scenario".
+		botSlug = r.FormValue("scenario")
+	}
+	if botSlug == "" {
+		botSlug = h.d.DefaultBotSlug
+	}
+	if tenantSlug == "" || botSlug == "" {
+		return nil, fmt.Errorf("bot_id or (tenant_slug + bot_slug) required")
+	}
+	t, err := h.d.BotLookup.GetTenantBySlug(ctx, tenantSlug)
+	if err != nil {
+		return nil, fmt.Errorf("tenant lookup: %w", err)
+	}
+	if t == nil {
+		return nil, fmt.Errorf("tenant %q not found", tenantSlug)
+	}
+	return h.d.BotLookup.GetBotByTenantAndSlug(ctx, t.ID, botSlug)
 }
 
 // --- helpers ---

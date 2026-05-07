@@ -9,16 +9,23 @@ import (
 
 	"github.com/fiorix/go-eventsocket/eventsocket"
 
+	"callbot-master/internal/registry"
 	"callbot-master/internal/session"
+	"callbot-master/internal/store"
 )
 
+// BotResolver looks up a bot by inbound DID. nil result = no route.
+type BotResolver interface {
+	GetBotByDID(ctx context.Context, did string) (*store.BotConfig, error)
+}
+
 // InboundDeps wires the inbound handler. Runner is shared with outbound
-// (one per process); inbound-specific knobs live alongside.
+// (one per process); per-call provider construction goes through Registry.
 type InboundDeps struct {
 	Runner    *SessionRunner
-	DID       string
+	Resolver  BotResolver       // nil → 503: every PARK is rejected
+	Registry  *registry.Registry
 	PickupSLA time.Duration
-	Scenario  string
 }
 
 // InboundHandler subscribes to CHANNEL_PARK and runs an inbound session
@@ -31,8 +38,6 @@ type InboundHandler struct {
 	startOnce sync.Once
 }
 
-// NewInboundHandler binds the handler to a root context so graceful
-// shutdown (parent cancel → drain) cascades to in-flight calls.
 func NewInboundHandler(rootCtx context.Context, d InboundDeps) *InboundHandler {
 	if d.PickupSLA <= 0 {
 		d.PickupSLA = 30 * time.Second
@@ -44,13 +49,12 @@ func NewInboundHandler(rootCtx context.Context, d InboundDeps) *InboundHandler {
 func (h *InboundHandler) Register() {
 	h.startOnce.Do(func() {
 		h.d.Runner.ESL.RegisterHandler("CHANNEL_PARK", h.onPark)
-		slog.Info("inbound handler registered",
-			"did", h.d.DID, "pickup_sla", h.d.PickupSLA.String())
+		slog.Info("inbound handler registered (DID-driven routing)",
+			"pickup_sla", h.d.PickupSLA.String())
 	})
 }
 
 // Wait blocks until every spawned inbound session goroutine has exited.
-// Pair with Sessions.DrainAll for graceful shutdown.
 func (h *InboundHandler) Wait() { h.wg.Wait() }
 
 func (h *InboundHandler) onPark(ev *eventsocket.Event) {
@@ -61,40 +65,59 @@ func (h *InboundHandler) onPark(ev *eventsocket.Event) {
 	if uuid == "" {
 		return
 	}
-	if dest != h.d.DID {
-		slog.Debug("inbound park ignored (DID mismatch)",
-			"call_uuid", uuid, "dest", dest, "want", h.d.DID)
+	if h.d.Resolver == nil || h.d.Registry == nil {
+		slog.Warn("inbound park dropped (resolver/registry not wired)",
+			"call_uuid", uuid, "did", dest)
 		return
 	}
 	if _, exists := h.d.Runner.Sessions.Get(uuid); exists {
-		slog.Debug("inbound park duplicate (session already running)",
-			"call_uuid", uuid)
+		slog.Debug("inbound park duplicate", "call_uuid", uuid)
+		return
+	}
+
+	// DB lookup happens on the ESL goroutine; fast (indexed PK on did).
+	// If ever measurably slow we'd cache, but a single PK lookup is
+	// cheaper than the goroutine spawn that follows.
+	lookupCtx, cancel := context.WithTimeout(h.rootCtx, 2*time.Second)
+	bot, err := h.d.Resolver.GetBotByDID(lookupCtx, dest)
+	cancel()
+	if err != nil {
+		slog.Error("inbound bot lookup failed",
+			"call_uuid", uuid, "did", dest, "err", err)
+		return
+	}
+	if bot == nil {
+		slog.Info("inbound park ignored (no bot for DID)",
+			"call_uuid", uuid, "did", dest)
+		return
+	}
+
+	providers, err := h.d.Registry.For(h.rootCtx, bot)
+	if err != nil {
+		slog.Error("inbound provider build failed",
+			"call_uuid", uuid, "bot_id", bot.ID, "err", err)
 		return
 	}
 
 	startedAt := time.Now()
 	slog.Info("inbound park accepted",
-		"call_uuid", uuid, "from", caller, "did", dest)
+		"call_uuid", uuid, "from", caller, "did", dest,
+		"tenant", bot.TenantSlug, "bot", bot.Slug)
 
-	// Spawn the session in a goroutine — never block the ESL loop.
-	//
-	// Earlier versions of this code launched a 30 s "pickup SLA" watchdog
-	// here because the SIP team had `sched_hangup +30 allotted_timeout`
-	// in the dialplan and we wanted a master-side warning when audio
-	// path setup didn't complete in time. The SIP team has since removed
-	// the sched_hangup, so the watchdog only ever fired on long calls
-	// (false positive). Removed; PickupSLA stays in config as a
-	// documented soft target but is not enforced.
 	h.wg.Add(1)
 	go func() {
 		defer h.wg.Done()
 		opts := RunOpts{
 			UUID:        uuid,
 			Caller:      caller,
-			Scenario:    h.d.Scenario,
+			Scenario:    bot.Slug, // scenario used for metrics labels + history
 			Direction:   session.DirectionInbound,
 			NeedsAnswer: true,
 			StartedAt:   startedAt,
+			Bot:         bot,
+			ASR:         providers.ASR,
+			TTS:         providers.TTS,
+			BotImpl:     providers.Bot,
 		}
 		if err := h.d.Runner.Run(h.rootCtx, opts); err != nil {
 			slog.Error("inbound session ended with error",
@@ -104,8 +127,6 @@ func (h *InboundHandler) onPark(ev *eventsocket.Event) {
 }
 
 // pickInboundDest extracts the destination number from a CHANNEL_PARK event.
-// FS exposes several variants depending on dialplan + SIP profile; we try
-// the most reliable ones in order.
 func pickInboundDest(ev *eventsocket.Event) string {
 	candidates := []string{
 		"Caller-Destination-Number",

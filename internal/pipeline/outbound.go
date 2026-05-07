@@ -12,14 +12,20 @@ import (
 
 	"github.com/fiorix/go-eventsocket/eventsocket"
 
+	"callbot-master/internal/asr"
+	"callbot-master/internal/bot"
 	"callbot-master/internal/campaign"
 	"callbot-master/internal/metrics"
+	"callbot-master/internal/registry"
 	"callbot-master/internal/session"
+	"callbot-master/internal/store"
+	"callbot-master/internal/tts"
 )
 
 // OutboundDeps wires the outbound handler.
 type OutboundDeps struct {
-	Runner *SessionRunner
+	Runner   *SessionRunner
+	Registry *registry.Registry // resolves providers from BotConfig
 }
 
 // outboundMetrics is a small accessor — we read Metrics off the runner so
@@ -34,12 +40,16 @@ func (h *OutboundHandler) outboundMetrics() *metrics.Collectors {
 // MakeCampaignOriginateFunc adapts the handler's Originate to the signature
 // the campaign manager expects, routing status updates through the manager
 // so campaign_progress metrics stay in sync.
-func (h *OutboundHandler) MakeCampaignOriginateFuncWithManager(mgr *campaign.Manager, c *campaign.Campaign) campaign.OriginateFunc {
+//
+// Bot is captured at campaign-create time, not at originate time, so a
+// running campaign keeps using the bot config it was started with even
+// if an admin edits the bot row in the meantime.
+func (h *OutboundHandler) MakeCampaignOriginateFuncWithManager(mgr *campaign.Manager, c *campaign.Campaign, b *store.BotConfig) campaign.OriginateFunc {
 	return func(ctx context.Context, phone, callerID, scenario string, cd map[string]any) (string, error) {
 		return h.Originate(ctx, OriginateOpts{
 			Phone:      phone,
 			CallerID:   callerID,
-			Scenario:   scenario,
+			Bot:        b,
 			CustomData: cd,
 			OnAnswered: func(uuid string) {
 				mgr.SetLeadStatus(c, uuid, campaign.StatusAnswered, "")
@@ -53,12 +63,20 @@ func (h *OutboundHandler) MakeCampaignOriginateFuncWithManager(mgr *campaign.Man
 
 // pendingCall holds the metadata of an originated call until the callee
 // answers (CHANNEL_ANSWER) — at which point we hand off to SessionRunner.
+// Bot config + providers are captured here at Originate time so a campaign
+// running in parallel cannot have its bot config swapped mid-flight if
+// an admin edits it.
 type pendingCall struct {
 	uuid       string
 	phone      string
 	scenario   string
 	customData map[string]any
 	originated time.Time
+	// Resolved at Originate; used at ANSWER time.
+	bot        *store.BotConfig
+	asrClient  asr.Client
+	ttsClient  tts.Client
+	botClient  bot.Client
 	// Optional callbacks for campaign integration.
 	onAnswered func(uuid string)
 	onEnded    func(uuid string, status campaign.CallStatus, errMsg string)
@@ -97,10 +115,13 @@ func (h *OutboundHandler) Wait() { h.wg.Wait() }
 // OriginateOpts groups the fields needed to place an outbound call.
 // onAnswered/onEnded are optional hooks the campaign manager uses to keep
 // lead status in sync with FS reality.
+//
+// Bot is required: the campaign manager resolves it before calling
+// Originate, so this handler doesn't need to know about the DB.
 type OriginateOpts struct {
 	Phone      string
 	CallerID   string
-	Scenario   string
+	Bot        *store.BotConfig
 	CustomData map[string]any
 	OnAnswered func(uuid string)
 	OnEnded    func(uuid string, status campaign.CallStatus, errMsg string)
@@ -113,13 +134,27 @@ type OriginateOpts struct {
 // If the originate API call fails, the UUID is dropped from pending and
 // onEnded(StatusFailed) is invoked synchronously.
 func (h *OutboundHandler) Originate(ctx context.Context, opts OriginateOpts) (string, error) {
+	if opts.Bot == nil {
+		return "", fmt.Errorf("originate: bot config required")
+	}
+	if h.d.Registry == nil {
+		return "", fmt.Errorf("originate: registry not wired")
+	}
+	providers, err := h.d.Registry.For(ctx, opts.Bot)
+	if err != nil {
+		return "", fmt.Errorf("resolve providers: %w", err)
+	}
 	uuid := genUUID()
 	pc := &pendingCall{
 		uuid:       uuid,
 		phone:      opts.Phone,
-		scenario:   opts.Scenario,
+		scenario:   opts.Bot.Slug,
 		customData: opts.CustomData,
 		originated: time.Now(),
+		bot:        opts.Bot,
+		asrClient:  providers.ASR,
+		ttsClient:  providers.TTS,
+		botClient:  providers.Bot,
 		onAnswered: opts.OnAnswered,
 		onEnded:    opts.OnEnded,
 	}
@@ -129,10 +164,7 @@ func (h *OutboundHandler) Originate(ctx context.Context, opts OriginateOpts) (st
 	if caller == "" {
 		caller = "callbot"
 	}
-	scenario := opts.Scenario
-	if scenario == "" {
-		scenario = "default"
-	}
+	scenario := opts.Bot.Slug
 	// "bot id" arg in v1's Originate signature was a custom var; we keep
 	// the slot for compatibility but don't rely on it.
 	if err := h.d.Runner.ESL.Originate(uuid, opts.Phone, caller, "bot-"+uuid, scenario); err != nil {
@@ -191,6 +223,10 @@ func (h *OutboundHandler) onAnswer(ev *eventsocket.Event) {
 			Direction:   session.DirectionOutbound,
 			NeedsAnswer: false, // callee already answered
 			StartedAt:   startedAt,
+			Bot:         pc.bot,
+			ASR:         pc.asrClient,
+			TTS:         pc.ttsClient,
+			BotImpl:     pc.botClient,
 			LeadID:      strFromMap(pc.customData, "lead_id"),
 			Gender:      strFromMap(pc.customData, "gender"),
 			Name:        strFromMap(pc.customData, "name"),
@@ -267,12 +303,12 @@ func classifyHangup(cause string) campaign.CallStatus {
 
 // MakeCampaignOriginateFunc adapts the handler's Originate to the signature
 // the campaign manager expects.
-func (h *OutboundHandler) MakeCampaignOriginateFunc(c *campaign.Campaign) campaign.OriginateFunc {
+func (h *OutboundHandler) MakeCampaignOriginateFunc(c *campaign.Campaign, b *store.BotConfig) campaign.OriginateFunc {
 	return func(ctx context.Context, phone, callerID, scenario string, cd map[string]any) (string, error) {
 		return h.Originate(ctx, OriginateOpts{
 			Phone:      phone,
 			CallerID:   callerID,
-			Scenario:   scenario,
+			Bot:        b,
 			CustomData: cd,
 			OnAnswered: func(uuid string) {
 				c.SetLeadStatus(uuid, campaign.StatusAnswered, "")

@@ -32,22 +32,18 @@ import (
 // SessionRunner owns the shared call lifecycle: answer (if needed) → mkfifo
 // → uuid_record → uuid_broadcast → greeting + turn loop → cleanup.
 //
-// Both inbound (PARK pickup) and outbound (campaign-originated, ANSWER
-// pickup) flows construct one of these and call Run.
+// Providers (ASR/TTS/Bot) are no longer carried by the runner — they're
+// resolved per-call from the bot config and passed via RunOpts. The
+// runner only owns process-wide state (ESL, dirs, store, archiver).
 type SessionRunner struct {
 	ESL          *freeswitch.EventSocket
 	Sessions     *session.Manager
-	ASR          asr.Client
-	TTS          tts.Client
-	Bot          bot.Client
 	NewVAD       func() vad.Detector
 	RecordingDir string
 	TTSDir       string
 	FrameBytes   int
 	PipelineCfg  Config
-	BargeIn       bool                // toggle barge-in detection during Speak
-	BargeMinWords int                 // word threshold; 0 → use Pipeline default (3)
-	Metrics       *metrics.Collectors // nil-safe
+	Metrics      *metrics.Collectors // nil-safe
 	Store        CallStore           // nil-safe — when set, every call is persisted at end of Run
 	Archiver     *recording.Archiver // nil-safe — copies FS recording to persistent dir post-hangup
 
@@ -205,7 +201,11 @@ type CallStore interface {
 	Insert(ctx context.Context, r *store.CallRecord) error
 }
 
-// RunOpts describes one call's setup decisions.
+// RunOpts describes one call's setup decisions, including the bot config
+// snapshot and provider clients resolved before Run is called. The
+// providers MUST come from a registry.For(bot) call so they reflect the
+// per-bot endpoint/token; mid-call edits to the bot row are ignored —
+// the snapshot is in-flight for the call's lifetime.
 type RunOpts struct {
 	UUID        string
 	Caller      string // caller-id number (logging only)
@@ -215,6 +215,13 @@ type RunOpts struct {
 	NeedsAnswer bool      // inbound (parked) → true; outbound (callee picked up) → false
 	StartedAt   time.Time // event-time of the trigger (PARK or ANSWER) for SLA tracking
 	OnEnd       func()    // optional callback at end-of-call (campaign status update, etc.)
+
+	// Per-call providers + behavior — resolved by caller via registry.
+	Bot      *store.BotConfig // snapshot of the bot row used for this call
+	ASR      asr.Client
+	TTS      tts.Client
+	BotImpl  bot.Client // named to avoid collision with Bot field above
+
 	// Lead metadata for outbound campaigns; persisted into call_history.
 	LeadID string
 	Gender string
@@ -359,6 +366,9 @@ func (r *SessionRunner) Run(parent context.Context, opts RunOpts) (retErr error)
 		"record_fifo", recordPath,
 		"tts_dir", r.TTSDir)
 
+	if opts.ASR == nil || opts.TTS == nil || opts.BotImpl == nil {
+		return fmt.Errorf("RunOpts: ASR/TTS/BotImpl required (resolve via registry)")
+	}
 	pCfg := r.PipelineCfg
 	if pCfg.SampleRate == 0 {
 		pCfg = Defaults()
@@ -367,11 +377,13 @@ func (r *SessionRunner) Run(parent context.Context, opts RunOpts) (retErr error)
 	if r.NewVAD != nil {
 		v = r.NewVAD()
 	}
-	p = New(opts.UUID, pCfg, r.ASR, r.TTS, r.Bot, v)
+	p = New(opts.UUID, pCfg, opts.ASR, opts.TTS, opts.BotImpl, v)
 	p.Scenario = opts.Scenario
 	p.Metrics = r.Metrics
-	p.BargeIn = r.BargeIn
-	p.BargeMinWords = r.BargeMinWords
+	if opts.Bot != nil {
+		p.BargeIn = opts.Bot.BargeInEnabled
+		p.BargeMinWords = opts.Bot.BargeInMinWords
+	}
 	p.ESL = r.ESL // satisfies bargeESL interface
 	p.PlaybackOpen = playbackOpen
 

@@ -25,6 +25,11 @@ func buildCallRecord(opts RunOpts, p *Pipeline, runErr error, endedAt time.Time)
 		StartTime: opts.StartedAt,
 		EndTime:   endedAt,
 	}
+	if opts.Bot != nil {
+		tid, bid := opts.Bot.TenantID, opts.Bot.ID
+		rec.TenantID = &tid
+		rec.BotID = &bid
+	}
 
 	switch {
 	case runErr == nil:

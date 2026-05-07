@@ -8,6 +8,8 @@ package store
 import (
 	"time"
 
+	"github.com/google/uuid"
+
 	"callbot-master/internal/bot"
 )
 
@@ -31,6 +33,8 @@ type CallRecord struct {
 	History      []Turn    `json:"history"`
 	ErrorMessage string    `json:"error_message,omitempty"`
 	RecordingURL string    `json:"recording_url,omitempty"`
+	TenantID     *uuid.UUID `json:"tenant_id,omitempty"`
+	BotID        *uuid.UUID `json:"bot_id,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
 }
 
@@ -54,4 +58,8 @@ type ListFilter struct {
 	Until     time.Time
 	Limit     int
 	Offset    int
+	// TenantID, when non-nil, restricts the query to one tenant. Set by
+	// the API layer based on the caller's identity (tenant_user) and
+	// left nil for platform_admin.
+	TenantID *uuid.UUID
 }

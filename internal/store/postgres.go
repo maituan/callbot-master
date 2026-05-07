@@ -72,11 +72,13 @@ func (p *Postgres) Insert(ctx context.Context, r *CallRecord) error {
 INSERT INTO call_history (
     call_id, direction, scenario, phone,
     lead_id, gender, name, plate,
-    start_time, end_time, status, action, history, error_message, recording_url
+    start_time, end_time, status, action, history, error_message, recording_url,
+    tenant_id, bot_id
 ) VALUES (
     $1, $2, $3, $4,
     $5, $6, $7, $8,
-    $9, $10, $11, $12, $13, $14, $15
+    $9, $10, $11, $12, $13, $14, $15,
+    $16, $17
 )
 ON CONFLICT (call_id) DO UPDATE SET
     end_time      = EXCLUDED.end_time,
@@ -86,13 +88,16 @@ ON CONFLICT (call_id) DO UPDATE SET
     error_message = EXCLUDED.error_message,
     -- Don't blank an existing recording_url with NULL on UPSERT — the
     -- archiver writes it AFTER the initial Insert, in a separate UPDATE.
-    recording_url = COALESCE(EXCLUDED.recording_url, call_history.recording_url);
+    recording_url = COALESCE(EXCLUDED.recording_url, call_history.recording_url),
+    tenant_id     = COALESCE(EXCLUDED.tenant_id, call_history.tenant_id),
+    bot_id        = COALESCE(EXCLUDED.bot_id, call_history.bot_id);
 `
 	_, err = p.pool.Exec(ctx, q,
 		r.CallID, r.Direction, r.Scenario, r.Phone,
 		nullStr(r.LeadID), nullStr(r.Gender), nullStr(r.Name), nullStr(r.Plate),
 		r.StartTime, r.EndTime, r.Status, nullStr(r.Action),
 		historyJSON, nullStr(r.ErrorMessage), nullStr(r.RecordingURL),
+		r.TenantID, r.BotID,
 	)
 	return err
 }
@@ -115,7 +120,8 @@ SELECT call_id, direction, scenario, phone,
        COALESCE(lead_id,''), COALESCE(gender,''), COALESCE(name,''), COALESCE(plate,''),
        start_time, end_time, duration_sec,
        status, COALESCE(action,''),
-       history, COALESCE(error_message,''), COALESCE(recording_url,''), created_at
+       history, COALESCE(error_message,''), COALESCE(recording_url,''),
+       tenant_id, bot_id, created_at
 FROM call_history
 WHERE call_id = $1
 `
@@ -163,6 +169,9 @@ func (p *Postgres) List(ctx context.Context, filter ListFilter) ([]*CallRecord, 
 	if !filter.Until.IsZero() {
 		add("start_time < $%d", filter.Until)
 	}
+	if filter.TenantID != nil {
+		add("tenant_id = $%d", *filter.TenantID)
+	}
 
 	q := strings.Builder{}
 	q.WriteString(`
@@ -170,7 +179,8 @@ SELECT call_id, direction, scenario, phone,
        COALESCE(lead_id,''), COALESCE(gender,''), COALESCE(name,''), COALESCE(plate,''),
        start_time, end_time, duration_sec,
        status, COALESCE(action,''),
-       history, COALESCE(error_message,''), COALESCE(recording_url,''), created_at
+       history, COALESCE(error_message,''), COALESCE(recording_url,''),
+       tenant_id, bot_id, created_at
 FROM call_history
 `)
 	if len(conds) > 0 {
@@ -209,7 +219,8 @@ func scanRow(row scannable) (*CallRecord, error) {
 		&r.LeadID, &r.Gender, &r.Name, &r.Plate,
 		&r.StartTime, &r.EndTime, &r.DurationSec,
 		&r.Status, &r.Action,
-		&historyJSON, &r.ErrorMessage, &r.RecordingURL, &r.CreatedAt,
+		&historyJSON, &r.ErrorMessage, &r.RecordingURL,
+		&r.TenantID, &r.BotID, &r.CreatedAt,
 	); err != nil {
 		return nil, err
 	}

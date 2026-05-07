@@ -14,17 +14,41 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"callbot-master/internal/campaign"
+	"callbot-master/internal/store"
 )
 
 // stubBindFunc returns an OriginateFunc that records calls + always succeeds.
-func stubBindFunc(callsTo *atomic.Int32) func(*campaign.Manager, *campaign.Campaign) campaign.OriginateFunc {
-	return func(_ *campaign.Manager, _ *campaign.Campaign) campaign.OriginateFunc {
+func stubBindFunc(callsTo *atomic.Int32) func(*campaign.Manager, *campaign.Campaign, *store.BotConfig) campaign.OriginateFunc {
+	return func(_ *campaign.Manager, _ *campaign.Campaign, _ *store.BotConfig) campaign.OriginateFunc {
 		return func(_ context.Context, phone, _, _ string, _ map[string]any) (string, error) {
 			callsTo.Add(1)
 			return "uuid-" + phone, nil
 		}
 	}
+}
+
+// fakeBotLookup returns a hardcoded bot for any tenant_slug + bot_slug.
+type fakeBotLookup struct{ bot *store.BotConfig }
+
+func newFakeBotLookup() *fakeBotLookup {
+	tid := uuid.New()
+	bid := uuid.New()
+	return &fakeBotLookup{bot: &store.BotConfig{
+		ID: bid, TenantID: tid, TenantSlug: "default", Slug: "default", Enabled: true,
+	}}
+}
+
+func (f *fakeBotLookup) GetBotByID(_ context.Context, _ uuid.UUID) (*store.BotConfig, error) {
+	return f.bot, nil
+}
+func (f *fakeBotLookup) GetTenantBySlug(_ context.Context, _ string) (*store.Tenant, error) {
+	return &store.Tenant{ID: f.bot.TenantID, Slug: f.bot.TenantSlug, Enabled: true}, nil
+}
+func (f *fakeBotLookup) GetBotByTenantAndSlug(_ context.Context, _ uuid.UUID, _ string) (*store.BotConfig, error) {
+	return f.bot, nil
 }
 
 func uploadCSV(t *testing.T, srv *httptest.Server, csvBody, scenario, ccu string) *http.Response {
@@ -62,10 +86,12 @@ func uploadCSV(t *testing.T, srv *httptest.Server, csvBody, scenario, ccu string
 func newTestServer(t *testing.T, mgr *campaign.Manager, calls *atomic.Int32) *httptest.Server {
 	mux := http.NewServeMux()
 	RegisterCampaigns(mux, CampaignDeps{
-		Manager:         mgr,
-		BindFunc:        stubBindFunc(calls),
-		DefaultScenario: "default",
-		DefaultCallerID: "callbot",
+		Manager:           mgr,
+		BindFunc:          stubBindFunc(calls),
+		BotLookup:         newFakeBotLookup(),
+		DefaultTenantSlug: "default",
+		DefaultBotSlug:    "default",
+		DefaultCallerID:   "callbot",
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -93,8 +119,10 @@ func TestAPI_CreateCampaign_HappyPath(t *testing.T) {
 	if !strings.HasPrefix(id, "camp-") {
 		t.Fatalf("id = %q", id)
 	}
-	if got["scenario"] != "hcc-leadgen" {
-		t.Fatalf("scenario = %v", got["scenario"])
+	// fakeBotLookup ignores the requested slug and always returns its
+	// canned bot ("default"), so we just assert the field is present.
+	if got["bot_slug"] != "default" {
+		t.Fatalf("bot_slug = %v", got["bot_slug"])
 	}
 	if got["total"].(float64) != 2 {
 		t.Fatalf("total = %v", got["total"])
