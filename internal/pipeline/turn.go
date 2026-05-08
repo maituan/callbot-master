@@ -130,8 +130,10 @@ type Pipeline struct {
 
 	// Per-turn outputs of the most recent Speak — read by RunTurn to build
 	// TurnRecord entries for the persistent call history.
-	lastBotText  string
-	lastBargedIn bool
+	lastBotText      string
+	lastBargedIn     bool
+	lastASRFinalAt   *time.Time // captured at end of Listen (or nil for greeting)
+	lastFirstAudioAt *time.Time // captured at first TTS frame (nil if barged before audio)
 
 	// history accumulates all turns of this call. Read by SessionRunner at
 	// end of Run via History().
@@ -148,6 +150,17 @@ type TurnRecord struct {
 	StartedAt time.Time
 	EndedAt   time.Time
 	BargedIn  bool
+
+	// ASRFinalAt — time the user "stopped speaking" (ASR is_final). Nil
+	// for the greeting turn (no Listen).
+	// FirstAudioAt — time the caller first heard a TTS audio frame for
+	// this turn's bot reply. Nil if the turn produced no audio (e.g.
+	// barged-in before TTS started).
+	//
+	// WaitMs (UI-derived) = FirstAudioAt - ASRFinalAt → the delay the
+	// caller perceives between finishing speaking and hearing the bot.
+	ASRFinalAt   *time.Time
+	FirstAudioAt *time.Time
 }
 
 // History returns the accumulated turn records (chronological).
@@ -357,6 +370,12 @@ readLoop:
 
 	final = strings.TrimSpace(final)
 	totalMs := time.Since(startedAt)
+	// Snapshot the moment ASR returned final — this is the wall-clock
+	// instant the user "stopped speaking" from the call's perspective.
+	// speakAndRecord copies it into TurnRecord so the UI can compute
+	// caller wait time = first_audio_at - asr_final_at.
+	finalAt := time.Now()
+	p.lastASRFinalAt = &finalAt
 	span.SetAttributes(
 		attribute.Int("transcript.len", len(final)),
 		attribute.Bool("src.eof", srcDrained),
@@ -386,6 +405,10 @@ readLoop:
 // to feed into the next Speak directly (no follow-up Listen needed).
 func (p *Pipeline) Speak(ctx context.Context, src AudioSource, sinkArg AudioSink, message string) (bot.Action, error) {
 	startedAt := time.Now()
+	// Reset per-turn capture: lastFirstAudioAt populates on first TTS
+	// frame inside this Speak. Greeting / barged-pre-audio turns leave
+	// it nil so persistence skips the field.
+	p.lastFirstAudioAt = nil
 
 	// Sink resolution is split: offline/tests resolve eagerly so the rest
 	// of Speak runs unchanged. The live FS path defers the sink (and its
@@ -521,6 +544,12 @@ func (p *Pipeline) Speak(ctx context.Context, src AudioSource, sinkArg AudioSink
 		for frame := range ttsStream.AudioChan() {
 			if firstAudioAt == 0 {
 				firstAudioAt = time.Since(startedAt)
+				// Snapshot wall-clock for the call_history record so the
+				// UI can show the caller's wait time (first_audio_at
+				// minus asr_final_at). Pointer because greeting may
+				// produce no audio and we want nil rather than zero.
+				now := time.Now()
+				p.lastFirstAudioAt = &now
 				addEventMs(ttsSpan, "first_audio", firstAudioAt.Milliseconds())
 				recordStage(p.Metrics, "tts.first_audio", p.Scenario, firstAudioAt.Seconds())
 			}
@@ -823,6 +852,12 @@ func (p *Pipeline) RunTurn(ctx context.Context, src AudioSource, sink AudioSink)
 	case p.pendingTranscript != "":
 		transcript = p.pendingTranscript
 		p.pendingTranscript = ""
+		// pendingTranscript came from the previous Speak's bargein monitor.
+		// "User finished speaking" timestamp = roughly now (waitForFinal
+		// has just returned). Listen was never called this turn so we
+		// stamp it here so the wait-time calc in the UI still works.
+		now := time.Now()
+		p.lastASRFinalAt = &now
 		slog.Info("pipeline.turn using barge-in transcript",
 			"call_uuid", p.UUID, "transcript", transcript)
 	case src != nil:
@@ -856,18 +891,25 @@ func (p *Pipeline) RunGreeting(ctx context.Context, src AudioSource, sink AudioS
 // continueCall=false. Centralizing it keeps the history bookkeeping in
 // one place.
 func (p *Pipeline) speakAndRecord(ctx context.Context, src AudioSource, sink AudioSink, transcript string, turnStart time.Time) (bool, error) {
+	// Greeting (transcript == "") had no Listen → drop any stale ASRFinalAt
+	// so the persisted record reads nil instead of the previous turn's value.
+	if transcript == "" {
+		p.lastASRFinalAt = nil
+	}
 	action, err := p.Speak(ctx, src, sink, transcript)
 	if err != nil {
 		return false, err
 	}
 	p.history = append(p.history, TurnRecord{
-		Index:     len(p.history),
-		UserText:  transcript,
-		BotText:   p.lastBotText,
-		Action:    action,
-		StartedAt: turnStart,
-		EndedAt:   time.Now(),
-		BargedIn:  p.lastBargedIn,
+		Index:        len(p.history),
+		UserText:     transcript,
+		BotText:      p.lastBotText,
+		Action:       action,
+		StartedAt:    turnStart,
+		EndedAt:      time.Now(),
+		BargedIn:     p.lastBargedIn,
+		ASRFinalAt:   p.lastASRFinalAt,
+		FirstAudioAt: p.lastFirstAudioAt,
 	})
 	if action == bot.ActionEndCall {
 		return false, nil

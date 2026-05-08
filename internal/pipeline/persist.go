@@ -46,13 +46,15 @@ func buildCallRecord(opts RunOpts, p *Pipeline, runErr error, endedAt time.Time)
 		var lastAction bot.Action
 		for i, t := range hist {
 			rec.History[i] = store.Turn{
-				Index:     t.Index,
-				UserText:  t.UserText,
-				BotText:   t.BotText,
-				Action:    t.Action,
-				StartedAt: t.StartedAt,
-				EndedAt:   t.EndedAt,
-				BargedIn:  t.BargedIn,
+				Index:        t.Index,
+				UserText:     t.UserText,
+				BotText:      t.BotText,
+				Action:       t.Action,
+				StartedAt:    t.StartedAt,
+				EndedAt:      t.EndedAt,
+				BargedIn:     t.BargedIn,
+				ASRFinalAt:   t.ASRFinalAt,
+				FirstAudioAt: t.FirstAudioAt,
 			}
 			lastAction = t.Action
 		}

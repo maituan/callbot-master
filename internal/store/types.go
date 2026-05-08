@@ -50,6 +50,15 @@ type Turn struct {
 	StartedAt time.Time  `json:"started_at"`
 	EndedAt   time.Time  `json:"ended_at"`
 	BargedIn  bool       `json:"barged_in,omitempty"`
+	// ASRFinalAt — the moment the user "stopped speaking" (ASR is_final).
+	// Nil for the greeting turn.
+	// FirstAudioAt — the moment the caller first heard a TTS audio frame
+	// for this turn. Nil if no audio was produced (e.g. barge-in fired
+	// before TTS started).
+	// UI computes wait_ms = FirstAudioAt - ASRFinalAt to show how long
+	// the caller waited after they stopped speaking.
+	ASRFinalAt   *time.Time `json:"asr_final_at,omitempty"`
+	FirstAudioAt *time.Time `json:"first_audio_at,omitempty"`
 }
 
 // ListFilter narrows GET /api/v1/calls results. Empty fields = no constraint.
