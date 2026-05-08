@@ -132,7 +132,7 @@ services:
     # query UI on :16686. In-memory span storage (lost on restart) — fine
     # for dev/single-host. For prod, swap to Tempo or self-hosted Jaeger
     # with Cassandra/Elasticsearch.
-    image: jaegertracing/all-in-one:1.62
+    image: jaegertracing/all-in-one:1.60
     container_name: callbot-jaeger
     network_mode: host
     environment:
