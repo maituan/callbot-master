@@ -87,7 +87,10 @@ func (h *InboundHandler) onPark(ev *eventsocket.Event) {
 		return
 	}
 	if bot == nil {
-		slog.Info("inbound park ignored (no bot for DID)",
+		// Demoted to debug: when v2 shares an ESL with another master/bridge,
+		// every PARK from the other process flows through here. The "this
+		// DID isn't ours" path fires constantly and isn't actionable.
+		slog.Debug("inbound park skipped (no bot for DID)",
 			"call_uuid", uuid, "did", dest)
 		return
 	}

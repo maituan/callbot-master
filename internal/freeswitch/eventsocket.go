@@ -3,6 +3,7 @@ package freeswitch
 import (
 	"fmt"
 	"log"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -158,7 +159,7 @@ func (es *EventSocket) processEvent(ev *eventsocket.Event) {
 	if eventName == "BACKGROUND_JOB" {
 		jobUUID := ev.Get("Job-Uuid")
 		body := ev.Body
-		log.Printf("[ESL] BACKGROUND_JOB job=%s body=%q", jobUUID, body)
+		slog.Debug("esl background_job", "job", jobUUID, "body", body)
 		if jobUUID != "" {
 			if ch, ok := es.bgJobs.LoadAndDelete(jobUUID); ok {
 				ch.(chan string) <- body
@@ -167,7 +168,11 @@ func (es *EventSocket) processEvent(ev *eventsocket.Event) {
 		return
 	}
 
-	log.Printf("[ESL] Event: %s [UUID: %s]", eventName, uuid)
+	// Per-event log is noisy when sharing FS with another master/bridge —
+	// every channel from the other process passes through here. Keep at
+	// debug; INFO-level "we acted on it" lines live in the relevant
+	// handler (inbound, outbound, runner).
+	slog.Debug("esl event", "name", eventName, "call_uuid", uuid)
 
 	es.mu.Lock()
 	pp := es.preProcess
@@ -201,7 +206,7 @@ func (es *EventSocket) SendAPI(command string) (string, error) {
 	es.apiMu.Lock()
 	defer es.apiMu.Unlock()
 
-	log.Printf("[ESL] api >> %s", command)
+	slog.Debug("esl api send", "command", command)
 
 	type sendResult struct {
 		ev  *eventsocket.Event
@@ -216,18 +221,18 @@ func (es *EventSocket) SendAPI(command string) (string, error) {
 	select {
 	case r := <-done:
 		if r.err != nil {
-			log.Printf("[ESL] api << ERROR: %v", r.err)
+			slog.Warn("esl api error", "command", command, "err", r.err)
 			return "", fmt.Errorf("api %s: %w", command, r.err)
 		}
 		var result string
 		if r.ev != nil {
 			result = r.ev.Body
 		}
-		log.Printf("[ESL] api << %s", result)
+		slog.Debug("esl api recv", "result", result)
 		return result, nil
 
 	case <-time.After(5 * time.Second):
-		log.Printf("[ESL] api << TIMEOUT (5s) command=%s — closing apiConn to recover", command)
+		slog.Warn("esl api timeout", "command", command, "timeout", "5s")
 		c.Close()
 		es.mu.Lock()
 		es.apiConn = nil
@@ -324,10 +329,10 @@ func (es *EventSocket) SendBgAPI(command string) (string, error) {
 	es.apiMu.Lock()
 	defer es.apiMu.Unlock()
 
-	log.Printf("[ESL] bgapi >> %s", command)
+	slog.Debug("esl bgapi send", "command", command)
 	ev, err := c.Send(fmt.Sprintf("bgapi %s", command))
 	if err != nil {
-		log.Printf("[ESL] bgapi << ERROR: %v", err)
+		slog.Warn("esl bgapi error", "command", command, "err", err)
 		return "", fmt.Errorf("bgapi %s: %w", command, err)
 	}
 
@@ -335,7 +340,7 @@ func (es *EventSocket) SendBgAPI(command string) (string, error) {
 	if ev != nil {
 		jobUUID = ev.Get("Job-UUID")
 	}
-	log.Printf("[ESL] bgapi << Job-UUID: %s", jobUUID)
+	slog.Debug("esl bgapi job-uuid", "job", jobUUID)
 	return jobUUID, nil
 }
 
