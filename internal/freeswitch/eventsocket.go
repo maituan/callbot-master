@@ -274,12 +274,12 @@ func (es *EventSocket) SendOriginate(command string) (string, error) {
 	}
 
 	es.apiMu.Lock()
-	log.Printf("[ESL] bgapi orig >> %s", command)
+	slog.Info("originate sent", "command", command)
 	ev, err := c.Send(fmt.Sprintf("bgapi %s", command))
 	es.apiMu.Unlock()
 
 	if err != nil {
-		log.Printf("[ESL] bgapi orig << ERROR: %v", err)
+		slog.Warn("originate bgapi error", "err", err)
 		return "", fmt.Errorf("originate bgapi: %w", err)
 	}
 
@@ -289,7 +289,7 @@ func (es *EventSocket) SendOriginate(command string) (string, error) {
 		if jobUUID == "" {
 			// Fallback: parse from Reply-Text "+OK Job-UUID: xxx"
 			replyText := ev.Get("Reply-Text")
-			log.Printf("[ESL] bgapi orig reply-text=%q body=%q", replyText, ev.Body)
+			slog.Debug("originate bgapi reply", "reply_text", replyText, "body", ev.Body)
 			if idx := strings.Index(replyText, "Job-UUID: "); idx >= 0 {
 				jobUUID = strings.TrimSpace(replyText[idx+len("Job-UUID: "):])
 			}
@@ -298,7 +298,7 @@ func (es *EventSocket) SendOriginate(command string) (string, error) {
 	if jobUUID == "" {
 		return "", fmt.Errorf("originate bgapi: no Job-UUID returned")
 	}
-	log.Printf("[ESL] bgapi orig << Job-UUID: %s", jobUUID)
+	slog.Debug("originate bgapi job", "job", jobUUID)
 
 	// Wait for BACKGROUND_JOB event with this jobUUID
 	ch := make(chan string, 1)
@@ -307,12 +307,12 @@ func (es *EventSocket) SendOriginate(command string) (string, error) {
 	select {
 	case result := <-ch:
 		result = strings.TrimSpace(result)
-		log.Printf("[ESL] bgapi orig result [%s]: %s", jobUUID, result)
+		slog.Info("originate result", "job", jobUUID, "result", result)
 		return result, nil
 
 	case <-time.After(60 * time.Second):
 		es.bgJobs.Delete(jobUUID)
-		log.Printf("[ESL] bgapi orig TIMEOUT (60s) job=%s", jobUUID)
+		slog.Warn("originate timeout", "job", jobUUID, "timeout", "60s")
 		return "", fmt.Errorf("originate timeout (60s)")
 	}
 }
