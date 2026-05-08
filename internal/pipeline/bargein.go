@@ -35,7 +35,15 @@ type bargeInMonitor struct {
 
 	triggered  atomic.Bool
 	triggerCh  chan struct{}
-	transcript atomic.Value // string
+	transcript atomic.Value // string — partial-at-trigger; replaced by final when it arrives
+
+	// finalCh emits the ASR is_final transcript after barge-in fires.
+	// The recv goroutine keeps reading the same ASR stream past the
+	// trigger threshold so the bot's next turn gets a complete
+	// transcript instead of the 3-word stub that tripped the trigger.
+	// Receivers should pair this with a timeout — caller may keep
+	// talking long after barge-in.
+	finalCh chan string
 
 	stopOnce sync.Once
 	stopCh   chan struct{}
@@ -84,6 +92,7 @@ func newBargeInMonitor(
 		src:       src,
 		stream:    stream,
 		triggerCh: make(chan struct{}),
+		finalCh:   make(chan string, 1), // buffered so emitter doesn't block on slow consumer
 		stopCh:    make(chan struct{}),
 		done:      make(chan struct{}),
 	}
@@ -123,29 +132,61 @@ func (m *bargeInMonitor) run(ctx context.Context) {
 		}
 	}()
 
-	// Transcript watcher: trip the trigger when the running text reaches
-	// the word threshold. Both partial and final results count — a partial
-	// "tôi muốn cấp đổi" already shows intent.
+	// Transcript watcher runs in two phases:
+	//   1. Pre-trigger: fires triggerCh as soon as a partial reaches the
+	//      word threshold. Captures that partial as a fallback transcript.
+	//   2. Post-trigger: keeps reading the same ASR stream until is_final
+	//      arrives, then emits the complete transcript on finalCh. This
+	//      lets Speak's caller wait for the full sentence — critical now
+	//      that we POST to bot only after final, not at trigger time.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		var lastText string
 		for res := range m.stream.Recv() {
 			text := strings.TrimSpace(res.Text)
-			if text == "" {
-				continue
+			if text != "" {
+				lastText = text
 			}
-			if countWords(text) < m.minWords {
-				continue
+			// Phase 1 — trigger as soon as the running partial passes the threshold.
+			if !m.triggered.Load() {
+				if text == "" || countWords(text) < m.minWords {
+					continue
+				}
+				if m.triggered.CompareAndSwap(false, true) {
+					m.transcript.Store(text)
+					slog.Info("bargein triggered",
+						"call_uuid", m.uuid,
+						"words", countWords(text),
+						"text", text)
+					close(m.triggerCh)
+				}
+				// Don't return — fall through to phase 2 to keep reading.
 			}
-			if m.triggered.CompareAndSwap(false, true) {
-				m.transcript.Store(text)
-				slog.Info("bargein triggered",
-					"call_uuid", m.uuid,
-					"words", countWords(text),
-					"text", text)
-				close(m.triggerCh)
+			// Phase 2 — once is_final arrives, emit the complete text and exit.
+			if res.IsFinal {
+				final := strings.TrimSpace(res.Text)
+				if final == "" {
+					// ASR finalised with empty text (silence detected after
+					// trigger) — keep the partial-at-trigger as fallback.
+					final = lastText
+				}
+				m.transcript.Store(final)
+				select {
+				case m.finalCh <- final:
+				default:
+				}
+				return
 			}
-			return
+		}
+		// Stream closed without final (cancelled, error). If we already
+		// triggered, surface the latest text as the final result so the
+		// caller doesn't block on finalCh forever.
+		if m.triggered.Load() && lastText != "" {
+			select {
+			case m.finalCh <- lastText:
+			default:
+			}
 		}
 	}()
 
@@ -169,6 +210,23 @@ func (m *bargeInMonitor) capturedTranscript() string {
 		return v.(string)
 	}
 	return ""
+}
+
+// waitForFinal blocks until the post-trigger watcher emits the final
+// transcript or the timeout fires. On timeout the partial-at-trigger
+// is returned so the call can still progress — caller is presumably
+// still talking and we'd rather POST a slightly-stale transcript than
+// hang forever.
+//
+// Should only be called after the trigger has fired (waitForFinal
+// without a trigger blocks until stop).
+func (m *bargeInMonitor) waitForFinal(timeout time.Duration) string {
+	select {
+	case t := <-m.finalCh:
+		return t
+	case <-time.After(timeout):
+		return m.capturedTranscript()
+	}
 }
 
 // bargeTriggerChan returns m.triggerChan() if m is non-nil, else a nil

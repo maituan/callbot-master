@@ -630,13 +630,15 @@ func (p *Pipeline) Speak(ctx context.Context, src AudioSource, sinkArg AudioSink
 			}
 		}
 		cancelBot()
-		if monitor != nil {
-			monitor.stop()
-			p.pendingTranscript = monitor.capturedTranscript()
-		}
 		if p.Metrics != nil {
 			p.Metrics.BargeInTotal.WithLabelValues(p.Scenario).Inc()
 		}
+		// NOTE: monitor is intentionally NOT stopped here. The post-trigger
+		// watcher keeps the ASR session alive so it can capture the full
+		// is_final transcript. pendingTranscript is set later (see the
+		// monitor.waitForFinal call near Speak's exit) — this ensures the
+		// next RunTurn POSTs the bot with a complete sentence instead of
+		// the 3-word stub that tripped the trigger.
 	}
 
 	select {
@@ -747,12 +749,30 @@ func (p *Pipeline) Speak(ctx context.Context, src AudioSource, sinkArg AudioSink
 	}
 
 	// Final barge-in post-processing — runs AFTER all possible trigger
-	// points (main select, audio drain, playback wait). The closure has
-	// already set p.pendingTranscript synchronously when fired; here we
-	// just override action and decorate the span. ENDCALL wins over CHAT
-	// in the rare race where the bot finished + emitted ENDCALL before
-	// the trigger actually closed the chain.
+	// points (main select, audio drain, playback wait).
+	//
+	// The trigger closure deliberately leaves the bargein monitor running
+	// so it can capture the full ASR is_final transcript (not just the
+	// 3-word stub that tripped the trigger). We wait for that final here,
+	// then stop the monitor. The next RunTurn picks up pendingTranscript
+	// and POSTs the bot with a complete sentence.
+	//
+	// Bounded by maxWaitFinal: if the caller keeps talking past that,
+	// we commit whatever's captured and let RunTurn proceed — better a
+	// slightly-stale transcript than a hung session.
+	const maxWaitFinal = 30 * time.Second
 	if bargeFired {
+		if monitor != nil {
+			waitStart := time.Now()
+			finalText := monitor.waitForFinal(maxWaitFinal)
+			p.pendingTranscript = finalText
+			botSpan.AddEvent("barge_in_final_captured",
+				trace.WithAttributes(
+					attribute.Int64("wait_ms", time.Since(waitStart).Milliseconds()),
+					attribute.Int("words", countWords(finalText)),
+				))
+			monitor.stop()
+		}
 		botSpan.SetAttributes(
 			attribute.Int("barge_in.transcript_words", countWords(p.pendingTranscript)),
 		)

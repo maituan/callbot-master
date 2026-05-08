@@ -46,12 +46,16 @@ func TestSpeak_BargeIn_TriggersOnNWordsAndCapturesTranscript(t *testing.T) {
 		src.ch <- bytes.Repeat([]byte{0x10, 0x20}, 160)
 	}
 
-	// Two-word partial first → MUST NOT trigger. Then 4-word → trigger.
+	// Two-word partial first → MUST NOT trigger. Then 5-word → trigger.
+	// Final emitted shortly after so Speak's waitForFinal returns quickly
+	// instead of hitting the 30s safety timeout.
 	go func() {
 		time.Sleep(15 * time.Millisecond)
 		asrStream.Emit(asr.Result{Text: "tôi muốn"}) // 2 words → ignored
 		time.Sleep(10 * time.Millisecond)
 		asrStream.Emit(asr.Result{Text: "tôi muốn cấp đổi căn cước"}) // 5 → trigger
+		time.Sleep(20 * time.Millisecond)
+		asrStream.Emit(asr.Result{Text: "tôi muốn cấp đổi căn cước hộ chiếu", IsFinal: true})
 	}()
 
 	// Push some TTS audio so we have something in flight when barge-in
@@ -72,8 +76,12 @@ func TestSpeak_BargeIn_TriggersOnNWordsAndCapturesTranscript(t *testing.T) {
 	if esl.stops.Load() == 0 {
 		t.Fatal("expected uuid_break (StopPlayback) to be called on barge-in")
 	}
-	if p.pendingTranscript != "tôi muốn cấp đổi căn cước" {
-		t.Fatalf("pendingTranscript = %q", p.pendingTranscript)
+	// pendingTranscript should be the IsFinal text, not the partial-at-trigger.
+	// This is the "wait for final after barge-in" contract: bot gets the
+	// complete sentence the caller said, not the 5-word stub that fired
+	// the trigger.
+	if p.pendingTranscript != "tôi muốn cấp đổi căn cước hộ chiếu" {
+		t.Fatalf("pendingTranscript = %q (expected IsFinal text)", p.pendingTranscript)
 	}
 }
 
