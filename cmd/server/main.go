@@ -289,6 +289,12 @@ func main() {
 		api.RegisterTenants(router.Mux(), api.TenantsDeps{Store: pgStore, Auditor: pgStore})
 		api.RegisterUsers(router.Mux(), api.UsersDeps{Store: pgStore, Auditor: pgStore})
 		api.RegisterAudit(router.Mux(), api.AuditDeps{Store: pgStore})
+		api.RegisterOriginate(router.Mux(), api.OriginateDeps{
+			Outbound:          outbound,
+			BotLookup:         pgStore,
+			DefaultCallerID:   "callbot",
+			DefaultTenantSlug: "hcc",
+		})
 	} else {
 		api.RegisterBots(router.Mux(), api.BotsDeps{}) // 503 stubs
 	}
