@@ -144,6 +144,12 @@ services:
       QUERY_HTTP_SERVER_HOST_PORT: ":16686"
       # 50k spans in memory is plenty for a few days of dev traffic.
       MEMORY_MAX_TRACES: "50000"
+      # Silence jaeger's own self-telemetry — by default it tries to
+      # send its internal spans to localhost:4317 (the standard OTLP
+      # port) which isn't there because we moved the receiver to
+      # 14317. Without this env every minute spits a noisy
+      # "connection refused" stack into the container log.
+      OTEL_TRACES_EXPORTER: "none"
     restart: unless-stopped
 
   ui:
