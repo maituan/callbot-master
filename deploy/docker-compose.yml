@@ -128,27 +128,26 @@ services:
     restart: unless-stopped
 
   jaeger:
-    # All-in-one Jaeger: OTLP gRPC receiver on :14317, OTLP HTTP on :14318,
-    # query UI on :16686. In-memory span storage (lost on restart) — fine
+    # All-in-one Jaeger: in-memory span storage (lost on restart) — fine
     # for dev/single-host. For prod, swap to Tempo or self-hosted Jaeger
-    # with Cassandra/Elasticsearch.
+    # with persistent backend.
+    #
+    # We use bridge networking + explicit port maps because the env-var
+    # port override in jaeger 1.60 is unreliable. Host-side ports stay in
+    # the 1xxxx range to avoid conflicts; container-side keeps defaults.
     image: jaegertracing/all-in-one:1.60
     container_name: callbot-jaeger
-    network_mode: host
+    ports:
+      - "14317:4317"   # OTLP gRPC — master sends spans here
+      - "14318:4318"   # OTLP HTTP
+      - "16686:16686"  # Query UI
     environment:
       COLLECTOR_OTLP_ENABLED: "true"
-      # Move all default ports off the conflicting 14250/16686/etc into
-      # the 1xxxx range so they don't clash with anything else on the box.
-      COLLECTOR_OTLP_GRPC_HOST_PORT: ":14317"
-      COLLECTOR_OTLP_HTTP_HOST_PORT: ":14318"
-      QUERY_HTTP_SERVER_HOST_PORT: ":16686"
-      # 50k spans in memory is plenty for a few days of dev traffic.
       MEMORY_MAX_TRACES: "50000"
       # Silence jaeger's own self-telemetry — by default it tries to
-      # send its internal spans to localhost:4317 (the standard OTLP
-      # port) which isn't there because we moved the receiver to
-      # 14317. Without this env every minute spits a noisy
-      # "connection refused" stack into the container log.
+      # send its internal spans to localhost:4317 inside the container
+      # (which IS the receiver itself, but timing of startup makes the
+      # first attempts race).
       OTEL_TRACES_EXPORTER: "none"
     restart: unless-stopped
 
