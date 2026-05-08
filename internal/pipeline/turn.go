@@ -911,6 +911,27 @@ func (p *Pipeline) speakAndRecord(ctx context.Context, src AudioSource, sink Aud
 		ASRFinalAt:   p.lastASRFinalAt,
 		FirstAudioAt: p.lastFirstAudioAt,
 	})
+
+	// Decorate the active turn span with caller_wait_ms so Jaeger
+	// search/sort works without manually subtracting span events.
+	// Only set when both timestamps are present (greeting + barged-pre-
+	// audio turns leave it off, the same way the UI hides the badge).
+	if turnSpan := trace.SpanFromContext(ctx); turnSpan.SpanContext().IsValid() {
+		if p.lastASRFinalAt != nil && p.lastFirstAudioAt != nil {
+			waitDur := p.lastFirstAudioAt.Sub(*p.lastASRFinalAt)
+			if waitDur >= 0 {
+				turnSpan.SetAttributes(attribute.Int64("caller.wait_ms", waitDur.Milliseconds()))
+				// Histogram so Grafana can plot p50/p95 caller wait
+				// over time — much more useful than per-call inspection.
+				recordStage(p.Metrics, "caller.wait", p.Scenario, waitDur.Seconds())
+			}
+		}
+		turnSpan.SetAttributes(
+			attribute.Bool("turn.barged_in", p.lastBargedIn),
+			attribute.String("turn.action", string(action)),
+		)
+	}
+
 	if action == bot.ActionEndCall {
 		return false, nil
 	}
