@@ -21,7 +21,6 @@ func buildCallRecord(opts RunOpts, p *Pipeline, runErr error, endedAt time.Time)
 		LeadID:    opts.LeadID,
 		Gender:    opts.Gender,
 		Name:      opts.Name,
-		Plate:     opts.Plate,
 		StartTime: opts.StartedAt,
 		EndTime:   endedAt,
 	}

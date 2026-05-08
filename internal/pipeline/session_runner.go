@@ -283,10 +283,12 @@ type RunOpts struct {
 	BotImpl  bot.Client // named to avoid collision with Bot field above
 
 	// Lead metadata for outbound campaigns; persisted into call_history.
+	// Domain-specific fields (e.g. plate) belong in CustomData on the
+	// Lead, not as RunOpts struct fields — they round-trip through the
+	// bot adapter without code changes here.
 	LeadID string
 	Gender string
 	Name   string
-	Plate  string
 }
 
 // Run blocks until the call ends (ENDCALL, hangup, error). Returns error

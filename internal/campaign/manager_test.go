@@ -10,6 +10,8 @@ import (
 )
 
 func TestParseCSV_Basic(t *testing.T) {
+	// "plate" is no longer a well-known column; it should round-trip
+	// through CustomData so the bot adapter still sees it.
 	csv := "phone,name,plate,note\n0901,An,ABC,VIP\n0902,Bình,DEF,\n"
 	leads, err := ParseCSV(strings.NewReader(csv))
 	if err != nil {
@@ -18,8 +20,11 @@ func TestParseCSV_Basic(t *testing.T) {
 	if len(leads) != 2 {
 		t.Fatalf("got %d leads, want 2", len(leads))
 	}
-	if leads[0].Phone != "0901" || leads[0].Name != "An" || leads[0].Plate != "ABC" {
+	if leads[0].Phone != "0901" || leads[0].Name != "An" {
 		t.Fatalf("lead0 = %+v", leads[0])
+	}
+	if leads[0].CustomData["plate"] != "ABC" {
+		t.Fatalf("lead0.plate (CustomData) = %v", leads[0].CustomData["plate"])
 	}
 	if leads[0].CustomData["note"] != "VIP" {
 		t.Fatalf("lead0.note = %v", leads[0].CustomData["note"])

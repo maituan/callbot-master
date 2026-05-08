@@ -267,10 +267,10 @@ func (m *Manager) runWorkers(ctx context.Context, run *campaignRun, opts CreateO
 }
 
 // mergeCustomData returns a copy of the lead's CustomData enriched with
-// the well-known fields (lead_id, gender, name, plate) so the adapter
-// only has to look at one map.
+// the well-known fields (lead_id, gender, name) so the adapter only has
+// to look at one map.
 func mergeCustomData(l *Lead) map[string]any {
-	out := make(map[string]any, len(l.CustomData)+4)
+	out := make(map[string]any, len(l.CustomData)+3)
 	for k, v := range l.CustomData {
 		out[k] = v
 	}
@@ -282,9 +282,6 @@ func mergeCustomData(l *Lead) map[string]any {
 	}
 	if l.Name != "" {
 		out["name"] = l.Name
-	}
-	if l.Plate != "" {
-		out["plate"] = l.Plate
 	}
 	return out
 }

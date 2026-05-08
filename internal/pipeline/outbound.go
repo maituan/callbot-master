@@ -240,7 +240,6 @@ func (h *OutboundHandler) onAnswer(ev *eventsocket.Event) {
 			LeadID:      strFromMap(pc.customData, "lead_id"),
 			Gender:      strFromMap(pc.customData, "gender"),
 			Name:        strFromMap(pc.customData, "name"),
-			Plate:       strFromMap(pc.customData, "plate"),
 			OnEnd: func() {
 				if pc.onEnded != nil {
 					pc.onEnded(uuid, campaign.StatusCompleted, "")

@@ -28,13 +28,16 @@ const (
 	StatusCanceled  CallStatus = "canceled"
 )
 
-// Lead is one row from the CSV plus runtime tracking fields.
+// Lead is one row from the CSV plus runtime tracking fields. Domain-
+// specific columns (e.g. "plate", "policy_id", "amount") live in
+// CustomData and are forwarded to the bot as chan vars; only the four
+// fields below are recognised explicitly because they map to columns
+// on call_history.
 type Lead struct {
 	Phone      string                 `json:"phone"`
 	LeadID     string                 `json:"lead_id,omitempty"`
 	Gender     string                 `json:"gender,omitempty"`
 	Name       string                 `json:"name,omitempty"`
-	Plate      string                 `json:"plate,omitempty"`
 	CustomData map[string]any         `json:"custom_data,omitempty"`
 	Status     CallStatus             `json:"status"`
 	CallUUID   string                 `json:"call_uuid,omitempty"`
@@ -69,8 +72,11 @@ func ParseCSV(r io.Reader) ([]*Lead, error) {
 		return nil, fmt.Errorf("CSV must have a 'phone' column")
 	}
 
+	// Well-known columns mapped directly to Lead fields. Anything else
+	// (incl. domain-specific columns like "plate", "policy_id" …) goes
+	// into CustomData so the bot adapter can still see it.
 	known := map[string]bool{
-		"phone": true, "lead_id": true, "gender": true, "name": true, "plate": true,
+		"phone": true, "lead_id": true, "gender": true, "name": true,
 	}
 
 	var leads []*Lead
@@ -102,8 +108,6 @@ func ParseCSV(r io.Reader) ([]*Lead, error) {
 				l.Gender = val
 			case "name":
 				l.Name = val
-			case "plate":
-				l.Plate = val
 			default:
 				if !known[col] {
 					l.CustomData[col] = val

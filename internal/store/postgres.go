@@ -71,14 +71,14 @@ func (p *Postgres) Insert(ctx context.Context, r *CallRecord) error {
 	const q = `
 INSERT INTO call_history (
     call_id, direction, scenario, phone,
-    lead_id, gender, name, plate,
+    lead_id, gender, name,
     start_time, end_time, status, action, history, error_message, recording_url,
     tenant_id, bot_id
 ) VALUES (
     $1, $2, $3, $4,
-    $5, $6, $7, $8,
-    $9, $10, $11, $12, $13, $14, $15,
-    $16, $17
+    $5, $6, $7,
+    $8, $9, $10, $11, $12, $13, $14,
+    $15, $16
 )
 ON CONFLICT (call_id) DO UPDATE SET
     end_time      = EXCLUDED.end_time,
@@ -94,7 +94,7 @@ ON CONFLICT (call_id) DO UPDATE SET
 `
 	_, err = p.pool.Exec(ctx, q,
 		r.CallID, r.Direction, r.Scenario, r.Phone,
-		nullStr(r.LeadID), nullStr(r.Gender), nullStr(r.Name), nullStr(r.Plate),
+		nullStr(r.LeadID), nullStr(r.Gender), nullStr(r.Name),
 		r.StartTime, r.EndTime, r.Status, nullStr(r.Action),
 		historyJSON, nullStr(r.ErrorMessage), nullStr(r.RecordingURL),
 		r.TenantID, r.BotID,
@@ -117,7 +117,7 @@ func (p *Postgres) SetRecordingURL(ctx context.Context, callID, url string) erro
 func (p *Postgres) Get(ctx context.Context, callID string) (*CallRecord, error) {
 	const q = `
 SELECT call_id, direction, scenario, phone,
-       COALESCE(lead_id,''), COALESCE(gender,''), COALESCE(name,''), COALESCE(plate,''),
+       COALESCE(lead_id,''), COALESCE(gender,''), COALESCE(name,''),
        start_time, end_time, duration_sec,
        status, COALESCE(action,''),
        history, COALESCE(error_message,''), COALESCE(recording_url,''),
@@ -176,7 +176,7 @@ func (p *Postgres) List(ctx context.Context, filter ListFilter) ([]*CallRecord, 
 	q := strings.Builder{}
 	q.WriteString(`
 SELECT call_id, direction, scenario, phone,
-       COALESCE(lead_id,''), COALESCE(gender,''), COALESCE(name,''), COALESCE(plate,''),
+       COALESCE(lead_id,''), COALESCE(gender,''), COALESCE(name,''),
        start_time, end_time, duration_sec,
        status, COALESCE(action,''),
        history, COALESCE(error_message,''), COALESCE(recording_url,''),
@@ -216,7 +216,7 @@ func scanRow(row scannable) (*CallRecord, error) {
 	var historyJSON []byte
 	if err := row.Scan(
 		&r.CallID, &r.Direction, &r.Scenario, &r.Phone,
-		&r.LeadID, &r.Gender, &r.Name, &r.Plate,
+		&r.LeadID, &r.Gender, &r.Name,
 		&r.StartTime, &r.EndTime, &r.DurationSec,
 		&r.Status, &r.Action,
 		&historyJSON, &r.ErrorMessage, &r.RecordingURL,

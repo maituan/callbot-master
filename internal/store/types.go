@@ -24,7 +24,10 @@ type CallRecord struct {
 	LeadID       string    `json:"lead_id,omitempty"`
 	Gender       string    `json:"gender,omitempty"`
 	Name         string    `json:"name,omitempty"`
-	Plate        string    `json:"plate,omitempty"`
+	// Note: the call_history.plate DB column is left intact for
+	// back-compat with earlier deployments, but no longer surfaced on
+	// the struct. Domain-specific lead fields go through CustomData on
+	// campaign.Lead and end up as bot chan vars, not stored columns.
 	StartTime    time.Time `json:"start_time"`
 	EndTime      time.Time `json:"end_time"`
 	DurationSec  int       `json:"duration_sec"` // computed by Postgres
