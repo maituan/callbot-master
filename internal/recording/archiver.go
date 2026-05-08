@@ -37,7 +37,12 @@ type URLPersister interface {
 // All fields except FileExt are required; nil/empty values disable the
 // archiver (Archive returns "", nil without doing anything).
 type Archiver struct {
-	SourceDir   string
+	// SourceDirs is the ordered list of dirs to search for the
+	// FS-side recording. We iterate and pick the first dir that has
+	// <callID><FileExt>. Inbound dialplan + outbound dialplan often
+	// write to different folders (e.g. voiceai-hotline vs voiceai),
+	// so the archiver tries both rather than picking one.
+	SourceDirs  []string
 	ArchiveDir  string
 	URLPrefix   string // "/recordings" or "https://cdn.example.com/recordings"
 	FileExt     string // ".mp3" by default
@@ -47,16 +52,29 @@ type Archiver struct {
 	Persister URLPersister
 }
 
-// New returns an Archiver with sensible defaults filled in.
+// New returns an Archiver with sensible defaults filled in. sourceDir
+// is a single path; use NewMulti for multiple source dirs.
 func New(sourceDir, archiveDir, urlPrefix, fileExt string, persister URLPersister) *Archiver {
+	return NewMulti([]string{sourceDir}, archiveDir, urlPrefix, fileExt, persister)
+}
+
+// NewMulti is the multi-source variant. Use when inbound + outbound
+// recordings end up in different folders.
+func NewMulti(sourceDirs []string, archiveDir, urlPrefix, fileExt string, persister URLPersister) *Archiver {
 	if fileExt == "" {
 		fileExt = ".mp3"
 	}
 	if !strings.HasPrefix(fileExt, ".") {
 		fileExt = "." + fileExt
 	}
+	dirs := make([]string, 0, len(sourceDirs))
+	for _, d := range sourceDirs {
+		if d != "" {
+			dirs = append(dirs, d)
+		}
+	}
 	return &Archiver{
-		SourceDir:   sourceDir,
+		SourceDirs:  dirs,
 		ArchiveDir:  archiveDir,
 		URLPrefix:   strings.TrimRight(urlPrefix, "/"),
 		FileExt:     fileExt,
@@ -69,7 +87,7 @@ func New(sourceDir, archiveDir, urlPrefix, fileExt string, persister URLPersiste
 // Enabled reports whether the archiver has the minimum config to run.
 // Speeds up the no-op path for ops who haven't wired recording yet.
 func (a *Archiver) Enabled() bool {
-	return a != nil && a.SourceDir != "" && a.ArchiveDir != ""
+	return a != nil && len(a.SourceDirs) > 0 && a.ArchiveDir != ""
 }
 
 // Archive copies the FS recording for callID to the archive dir and
@@ -82,11 +100,12 @@ func (a *Archiver) Archive(ctx context.Context, callID string) (string, error) {
 	if !a.Enabled() {
 		return "", nil
 	}
-	srcPath := filepath.Join(a.SourceDir, callID+a.FileExt)
 
-	// Wait for the source file to appear and stabilize. FS may hold
-	// the fd open for a beat after hangup to flush MP3 frames.
-	src, err := a.waitForFile(ctx, srcPath)
+	// Wait for the source file to appear in ANY of the configured
+	// source dirs. FS may write outbound to a different folder than
+	// inbound (e.g. voiceai vs voiceai-hotline) so we scan all of
+	// them on each attempt before backing off.
+	src, srcPath, err := a.waitForFile(ctx, callID)
 	if err != nil {
 		return "", err
 	}
@@ -140,30 +159,41 @@ func (a *Archiver) Archive(ctx context.Context, callID string) (string, error) {
 	return relURL, nil
 }
 
-// waitForFile keeps trying to open the source until it appears OR the
-// retry budget runs out. Returns the open file handle on success.
-func (a *Archiver) waitForFile(ctx context.Context, path string) (*os.File, error) {
+// waitForFile scans every configured source dir for <callID><FileExt>
+// and returns the first stable, non-empty file it finds. Retries with
+// the configured backoff when nothing appears yet — FS may still be
+// flushing post-hangup.
+//
+// Returns (file, full path that won, nil) on success.
+func (a *Archiver) waitForFile(ctx context.Context, callID string) (*os.File, string, error) {
+	name := callID + a.FileExt
 	for attempt := 0; attempt < a.MaxAttempts; attempt++ {
 		if attempt > 0 {
 			select {
 			case <-ctx.Done():
-				return nil, ctx.Err()
+				return nil, "", ctx.Err()
 			case <-time.After(a.WaitBetween):
 			}
 		}
-		f, err := os.Open(path)
-		if err == nil {
-			// FS may still be writing — verify size is non-zero and stable.
+		for _, dir := range a.SourceDirs {
+			path := filepath.Join(dir, name)
+			f, err := os.Open(path)
+			if err != nil {
+				if !os.IsNotExist(err) {
+					return nil, "", fmt.Errorf("open source %s: %w", path, err)
+				}
+				continue
+			}
+			// FS may still be writing — verify size is non-zero before
+			// declaring it ready. We don't need byte-stable detection
+			// because io.Copy below will read whatever's there at the
+			// moment we open + the kernel keeps the read consistent.
 			fi, statErr := f.Stat()
 			if statErr == nil && fi.Size() > 0 {
-				return f, nil
+				return f, path, nil
 			}
 			_ = f.Close()
-			continue
-		}
-		if !os.IsNotExist(err) {
-			return nil, fmt.Errorf("open source: %w", err)
 		}
 	}
-	return nil, errors.New("source file did not appear within retry window")
+	return nil, "", errors.New("source file did not appear in any source dir within retry window")
 }

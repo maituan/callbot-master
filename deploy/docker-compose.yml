@@ -57,6 +57,10 @@ services:
       # cloud DB), export MASTER_PG_DSN and skip the postgres service.
       MASTER_PG_DSN: "${MASTER_PG_DSN:-postgres://callbot:callbot@127.0.0.1:5433/callbot?sslmode=disable}"
       MASTER_RECORDING_SOURCE_DIR: "${MASTER_RECORDING_SOURCE_DIR:-/var/lib/freeswitch/recordings/voiceai-hotline}"
+      # Comma-separated list of additional dirs FS may write recordings
+      # to (e.g. outbound dialplan writes to /var/lib/freeswitch/recordings/voiceai).
+      # The archiver scans every dir on each retry until the file shows up.
+      MASTER_RECORDING_SOURCE_DIRS: "${MASTER_RECORDING_SOURCE_DIRS:-/var/lib/freeswitch/recordings/voiceai-hotline,/var/lib/freeswitch/recordings/voiceai}"
       MASTER_RECORDING_ARCHIVE_DIR: "${MASTER_RECORDING_ARCHIVE_DIR:-/var/lib/callbot/recordings}"
       MASTER_RECORDING_URL_PREFIX: "${MASTER_RECORDING_URL_PREFIX:-/recordings}"
       MASTER_RECORDING_FILE_EXT: "${MASTER_RECORDING_FILE_EXT:-.mp3}"

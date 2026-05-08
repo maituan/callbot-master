@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -53,10 +54,36 @@ type AuthConfig struct {
 //
 // Disable archiving by leaving SourceDir or ArchiveDir empty.
 type RecordingConfig struct {
-	SourceDir   string `yaml:"source_dir"`   // FS recordings dir, e.g. /var/lib/freeswitch/recordings/voiceai-hotline
-	ArchiveDir  string `yaml:"archive_dir"`  // Persistent archive, e.g. /var/lib/callbot/recordings
-	URLPrefix   string `yaml:"url_prefix"`   // HTTP prefix served by master, e.g. /recordings
-	FileExt     string `yaml:"file_ext"`     // ".mp3" (default) or ".wav"
+	// SourceDir is the legacy single-dir setting. Kept for back-compat;
+	// at runtime it's merged with SourceDirs into one search list.
+	SourceDir string `yaml:"source_dir"`
+	// SourceDirs lets ops list every dir FS writes recordings to.
+	// Inbound and outbound dialplans frequently target different
+	// folders (e.g. voiceai-hotline vs voiceai); the archiver scans
+	// every dir on each retry and picks the first match.
+	SourceDirs []string `yaml:"source_dirs"`
+	ArchiveDir string   `yaml:"archive_dir"` // Persistent archive, e.g. /var/lib/callbot/recordings
+	URLPrefix  string   `yaml:"url_prefix"`  // HTTP prefix served by master, e.g. /recordings
+	FileExt    string   `yaml:"file_ext"`    // ".mp3" (default) or ".wav"
+}
+
+// AllSourceDirs collapses SourceDir + SourceDirs into a unique list.
+// Stable order: SourceDirs first (admin-supplied), then the legacy
+// SourceDir if it isn't already in the list.
+func (r RecordingConfig) AllSourceDirs() []string {
+	seen := map[string]bool{}
+	out := []string{}
+	for _, d := range r.SourceDirs {
+		if d == "" || seen[d] {
+			continue
+		}
+		seen[d] = true
+		out = append(out, d)
+	}
+	if r.SourceDir != "" && !seen[r.SourceDir] {
+		out = append(out, r.SourceDir)
+	}
+	return out
 }
 
 type ServerConfig struct {
@@ -322,6 +349,7 @@ func applyEnvOverrides(c *Config) {
 	}
 	envBool("MASTER_OTEL_INSECURE", &c.Telemetry.Insecure)
 	envStr("MASTER_RECORDING_SOURCE_DIR", &c.Recording.SourceDir)
+	envCSV("MASTER_RECORDING_SOURCE_DIRS", &c.Recording.SourceDirs)
 	envStr("MASTER_RECORDING_ARCHIVE_DIR", &c.Recording.ArchiveDir)
 	envStr("MASTER_RECORDING_URL_PREFIX", &c.Recording.URLPrefix)
 	envStr("MASTER_RECORDING_FILE_EXT", &c.Recording.FileExt)
@@ -366,4 +394,22 @@ func envBool(key string, dst *bool) {
 	if b, err := strconv.ParseBool(v); err == nil {
 		*dst = b
 	}
+}
+
+// envCSV splits a comma-separated env value into a string slice. Empty
+// items are dropped; whitespace around items is trimmed.
+func envCSV(key string, dst *[]string) {
+	v := os.Getenv(key)
+	if v == "" {
+		return
+	}
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	*dst = out
 }

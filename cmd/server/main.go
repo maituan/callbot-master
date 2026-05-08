@@ -213,13 +213,14 @@ func main() {
 	// dir post-hangup and writes the resulting URL into call_history.
 	// Disabled if SourceDir or ArchiveDir is empty.
 	var archiver *recording.Archiver
-	if cfg.Recording.SourceDir != "" && cfg.Recording.ArchiveDir != "" {
+	srcDirs := cfg.Recording.AllSourceDirs()
+	if len(srcDirs) > 0 && cfg.Recording.ArchiveDir != "" {
 		var persister recording.URLPersister
 		if pgStore != nil {
 			persister = pgStore
 		}
-		archiver = recording.New(
-			cfg.Recording.SourceDir,
+		archiver = recording.NewMulti(
+			srcDirs,
 			cfg.Recording.ArchiveDir,
 			cfg.Recording.URLPrefix,
 			cfg.Recording.FileExt,
@@ -227,7 +228,7 @@ func main() {
 		)
 		runner.Archiver = archiver
 		slog.Info("recording archiver wired",
-			"source", cfg.Recording.SourceDir,
+			"sources", srcDirs,
 			"archive", cfg.Recording.ArchiveDir,
 			"url_prefix", cfg.Recording.URLPrefix)
 	}
