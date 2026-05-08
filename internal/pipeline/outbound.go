@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -165,9 +166,18 @@ func (h *OutboundHandler) Originate(ctx context.Context, opts OriginateOpts) (st
 		caller = "callbot"
 	}
 	scenario := opts.Bot.Slug
+	// Prepend the bot's outbound prefix (carrier-routing key in the FS
+	// dialplan) when set and the user-supplied phone doesn't already
+	// start with it. Lets ops type clean numbers (0971…) on the form
+	// while the dialplan keeps its `^3323(\d{10})$` regex working.
+	dial := opts.Phone
+	if opts.Bot.OutboundPrefix != "" && !strings.HasPrefix(dial, opts.Bot.OutboundPrefix) {
+		dial = opts.Bot.OutboundPrefix + dial
+	}
+	pc.phone = dial // dialed form is what FS will report; metrics + history align
 	// "bot id" arg in v1's Originate signature was a custom var; we keep
 	// the slot for compatibility but don't rely on it.
-	if err := h.d.Runner.ESL.Originate(uuid, opts.Phone, caller, "bot-"+uuid, scenario); err != nil {
+	if err := h.d.Runner.ESL.Originate(uuid, dial, caller, "bot-"+uuid, scenario); err != nil {
 		h.pending.Delete(uuid)
 		if m := h.outboundMetrics(); m != nil {
 			m.OriginateTotal.WithLabelValues("error").Inc()

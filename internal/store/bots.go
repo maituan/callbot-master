@@ -47,6 +47,12 @@ type BotConfig struct {
 	BargeInMinWords int
 	FillerEnabled   bool
 
+	// OutboundPrefix is prepended to the dialed phone before originate
+	// when the phone doesn't already start with it. Routes the call to
+	// the right carrier gateway via the FS dialplan (e.g. "3323" →
+	// minhphuc-vina, "3317" → leeon-viettel).
+	OutboundPrefix string
+
 	Version   int
 	CreatedAt time.Time
 	UpdatedAt time.Time
@@ -70,6 +76,7 @@ COALESCE(b.tts_voice_id, ''), b.tts_tempo,
 b.asr_silence_timeout_sec, b.asr_speech_timeout_sec, b.asr_speech_max_sec,
 b.asr_single_sentence,
 b.bargein_enabled, b.bargein_min_words, b.filler_enabled,
+COALESCE(b.outbound_prefix, ''),
 b.version, b.created_at, b.updated_at`
 
 // GetBotByDID resolves the inbound DID → bot. Returns nil,nil when no
@@ -177,10 +184,11 @@ INSERT INTO bots (
     asr_endpoint, asr_token,
     tts_endpoint, tts_token, tts_voice_id, tts_tempo,
     asr_silence_timeout_sec, asr_speech_timeout_sec, asr_speech_max_sec,
-    bargein_enabled, bargein_min_words, filler_enabled
+    bargein_enabled, bargein_min_words, filler_enabled,
+    outbound_prefix
 )
 VALUES ($1,$2,$3, $4,$5,$6, $7,$8, $9,$10,$11,$12,
-        $13,$14,$15, $16,$17,$18)
+        $13,$14,$15, $16,$17,$18, $19)
 ON CONFLICT (tenant_id, slug) DO UPDATE SET name = EXCLUDED.name
 RETURNING id`,
 		tenantID, in.BotSlug, in.BotName,
@@ -189,6 +197,7 @@ RETURNING id`,
 		in.TTSEndpoint, nullStr(in.TTSToken), nullStr(in.TTSVoiceID), in.TTSTempo,
 		in.ASRSilenceTimeoutSec, in.ASRSpeechTimeoutSec, in.ASRSpeechMaxSec,
 		in.BargeInEnabled, in.BargeInMinWords, in.FillerEnabled,
+		in.OutboundPrefix,
 	).Scan(&botID); err != nil {
 		return uuid.Nil, fmt.Errorf("upsert bot: %w", err)
 	}
@@ -227,10 +236,11 @@ INSERT INTO bots (
     tts_voice_id, tts_tempo,
     asr_silence_timeout_sec, asr_speech_timeout_sec, asr_speech_max_sec, asr_single_sentence,
     bargein_enabled, bargein_min_words, filler_enabled,
+    outbound_prefix,
     created_by, updated_by
 )
 VALUES ($1,$2,$3,$4, $5,$6,$7, $8,$9,$10, $11,$12,$13,
-        $14,$15, $16,$17,$18,$19, $20,$21,$22, $23,$23)
+        $14,$15, $16,$17,$18,$19, $20,$21,$22, $23, $24,$24)
 RETURNING id`
 	var id uuid.UUID
 	if err := p.pool.QueryRow(ctx, q,
@@ -241,6 +251,7 @@ RETURNING id`
 		nullStr(in.TTSVoiceID), in.TTSTempo,
 		in.ASRSilenceTimeoutSec, in.ASRSpeechTimeoutSec, in.ASRSpeechMaxSec, in.ASRSingleSentence,
 		in.BargeInEnabled, in.BargeInMinWords, in.FillerEnabled,
+		in.OutboundPrefix,
 		in.ActorUserID,
 	).Scan(&id); err != nil {
 		return uuid.Nil, fmt.Errorf("create bot: %w", err)
@@ -278,9 +289,10 @@ UPDATE bots SET
     bargein_enabled            = $21,
     bargein_min_words          = $22,
     filler_enabled             = $23,
+    outbound_prefix            = $24,
     version                    = version + 1,
-    updated_by                 = $24
-WHERE id = $25 AND version = $26 AND deleted_at IS NULL`
+    updated_by                 = $25
+WHERE id = $26 AND version = $27 AND deleted_at IS NULL`
 	tag, err := p.pool.Exec(ctx, q,
 		in.Slug, in.Name, in.Enabled,
 		in.BotURL, in.BotFirstByteTimeoutMs, in.BotTotalTimeoutMs,
@@ -291,6 +303,7 @@ WHERE id = $25 AND version = $26 AND deleted_at IS NULL`
 		nullStr(in.TTSVoiceID), in.TTSTempo,
 		in.ASRSilenceTimeoutSec, in.ASRSpeechTimeoutSec, in.ASRSpeechMaxSec, in.ASRSingleSentence,
 		in.BargeInEnabled, in.BargeInMinWords, in.FillerEnabled,
+		in.OutboundPrefix,
 		in.ActorUserID,
 		id, expectedVersion,
 	)
@@ -394,6 +407,8 @@ type BotWriteInput struct {
 	BargeInMinWords int
 	FillerEnabled   bool
 
+	OutboundPrefix string
+
 	ActorUserID *uuid.UUID
 }
 
@@ -444,6 +459,8 @@ type SeedBotInput struct {
 	BargeInEnabled  bool
 	BargeInMinWords int
 	FillerEnabled   bool
+
+	OutboundPrefix string
 }
 
 func scanBot(row scannable) (*BotConfig, error) {
@@ -457,6 +474,7 @@ func scanBot(row scannable) (*BotConfig, error) {
 		&b.ASRSilenceTimeoutSec, &b.ASRSpeechTimeoutSec, &b.ASRSpeechMaxSec,
 		&b.ASRSingleSentence,
 		&b.BargeInEnabled, &b.BargeInMinWords, &b.FillerEnabled,
+		&b.OutboundPrefix,
 		&b.Version, &b.CreatedAt, &b.UpdatedAt,
 	); err != nil {
 		return nil, err

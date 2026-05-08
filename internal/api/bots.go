@@ -425,6 +425,7 @@ func botDetail(b *store.BotConfig) map[string]any {
 	out["asr_single_sentence"] = b.ASRSingleSentence
 	out["bargein_min_words"] = b.BargeInMinWords
 	out["filler_enabled"] = b.FillerEnabled
+	out["outbound_prefix"] = b.OutboundPrefix
 	out["created_at"] = b.CreatedAt
 	return out
 }
@@ -487,6 +488,8 @@ type botWriteRequest struct {
 	BargeInMinWords int   `json:"bargein_min_words"`
 	FillerEnabled   *bool `json:"filler_enabled,omitempty"`
 
+	OutboundPrefix string `json:"outbound_prefix"`
+
 	Version *int `json:"version,omitempty"` // required on UPDATE
 }
 
@@ -535,6 +538,7 @@ func (req *botWriteRequest) toWriteInput(tenantID uuid.UUID, actor *uuid.UUID, f
 		BargeInEnabled:        coalesceBool(req.BargeInEnabled, true),
 		BargeInMinWords:       defaultInt(req.BargeInMinWords, 3),
 		FillerEnabled:         coalesceBool(req.FillerEnabled, false),
+		OutboundPrefix:        req.OutboundPrefix,
 		ActorUserID:           actor,
 	}, nil
 }
