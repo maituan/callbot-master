@@ -392,6 +392,9 @@ func (r *SessionRunner) Run(parent context.Context, opts RunOpts) (retErr error)
 		if opts.Bot.ASRSpeechMaxSec > 0 {
 			pCfg.ASRSpeechMax = time.Duration(opts.Bot.ASRSpeechMaxSec) * time.Second
 		}
+		// ASRSingleSentence is a true bool (no zero-value sentinel), so it
+		// always overlays. Operators set the default in the bot row, not env.
+		pCfg.ASRSingleSentence = opts.Bot.ASRSingleSentence
 	}
 	var v vad.Detector
 	if r.NewVAD != nil {

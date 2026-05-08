@@ -57,6 +57,7 @@ type Config struct {
 	ASRSilenceTimeout time.Duration // pre-speech silence → empty IsFinal
 	ASRSpeechTimeout  time.Duration // post-speech trailing silence → text IsFinal
 	ASRSpeechMax      time.Duration // hard cap on a single utterance
+	ASRSingleSentence bool          // hint to provider for utterance segmentation
 }
 
 // Defaults returns a config suitable for the HCC scenario at 8kHz.
@@ -70,6 +71,7 @@ func Defaults() Config {
 		ASRSilenceTimeout: 5 * time.Second,
 		ASRSpeechTimeout:  800 * time.Millisecond,
 		ASRSpeechMax:      30 * time.Second,
+		ASRSingleSentence: true,
 	}
 }
 
@@ -221,7 +223,7 @@ func (p *Pipeline) Listen(ctx context.Context, src AudioSource) (string, error) 
 		ConversationID:   p.UUID,
 		SampleRate:       p.Cfg.SampleRate,
 		Channels:         1,
-		SingleSentence:   true,
+		SingleSentence:   p.Cfg.ASRSingleSentence,
 		SilenceTimeoutMs: int(p.Cfg.ASRSilenceTimeout / time.Millisecond),
 		SpeechTimeoutMs:  int(p.Cfg.ASRSpeechTimeout / time.Millisecond),
 		SpeechMaxMs:      int(p.Cfg.ASRSpeechMax / time.Millisecond),

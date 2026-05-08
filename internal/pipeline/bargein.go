@@ -67,7 +67,7 @@ func newBargeInMonitor(
 		ConversationID: uuid + "-barge",
 		SampleRate:     rate,
 		Channels:       1,
-		SingleSentence: true,
+		SingleSentence: cfg.ASRSingleSentence,
 		// Stretch the silence floor so this session doesn't auto-finalize
 		// while the caller is just listening to the bot. We rely on the
 		// stop() call (Speak's defer) to close the stream when bot finishes.
