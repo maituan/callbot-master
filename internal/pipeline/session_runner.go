@@ -20,6 +20,7 @@ import (
 	"callbot-master/internal/asr"
 	"callbot-master/internal/audio"
 	"callbot-master/internal/bot"
+	"callbot-master/internal/filler"
 	"callbot-master/internal/freeswitch"
 	"callbot-master/internal/metrics"
 	"callbot-master/internal/recording"
@@ -46,6 +47,7 @@ type SessionRunner struct {
 	Metrics      *metrics.Collectors // nil-safe
 	Store        CallStore           // nil-safe — when set, every call is persisted at end of Run
 	Archiver     *recording.Archiver // nil-safe — copies FS recording to persistent dir post-hangup
+	Filler       *filler.Pool        // nil-safe — when set, Pipeline gets a FillerPlayer per call
 
 	// playbackStops maps a FIFO path → *playbackHandle for the in-flight
 	// utterance on that path. We key by FULL PATH (not uuid) because FS
@@ -135,6 +137,64 @@ func (r *SessionRunner) makePlaybackOpener(uuid string, logger *slog.Logger) Pla
 			"call_uuid", uuid, "path", path, "utt", n)
 		return h, nil
 	}
+}
+
+// makeFillerPlayer returns a Pipeline FillerPlayer that plays a random
+// filler file via uuid_broadcast. The handle reuses the same
+// playbackStops registry as TTS playback, so the global PLAYBACK_STOP
+// listener fires .signalDone() when FS confirms the break.
+//
+// stop() blocks until FS confirms PLAYBACK_STOP, with a 1.5 s safety
+// timeout — we'd rather drop the wait than deadlock the next TTS open.
+func (r *SessionRunner) makeFillerPlayer(logger *slog.Logger) FillerPlayer {
+	return fillerPlayerFunc(func(ctx context.Context, callUUID, voiceID string) (func(), bool) {
+		path := r.Filler.Pick(voiceID)
+		if path == "" {
+			return nil, false
+		}
+		h := &playbackHandle{
+			path:   path,
+			uuid:   callUUID,
+			logger: logger,
+			done:   make(chan struct{}),
+			runner: r,
+		}
+		// Register BEFORE broadcasting so a fast PLAYBACK_STOP can find us.
+		r.playbackStops.Store(path, h)
+		if err := r.ESL.PlayAudio(callUUID, path); err != nil {
+			r.playbackStops.Delete(path)
+			logger.Warn("filler play_audio failed", "call_uuid", callUUID, "err", err)
+			return nil, false
+		}
+		logger.Debug("filler started", "call_uuid", callUUID, "path", filepath.Base(path))
+
+		stop := func() {
+			// Idempotent: doneOnce inside playbackHandle guards against
+			// double-close. Issuing uuid_break twice is also harmless.
+			if err := r.ESL.StopPlayback(callUUID); err != nil {
+				logger.Debug("filler uuid_break failed", "call_uuid", callUUID, "err", err)
+			}
+			select {
+			case <-h.done:
+			case <-time.After(1500 * time.Millisecond):
+				// FS didn't emit PLAYBACK_STOP in time — drop the wait so
+				// the TTS FIFO open can proceed. Worst case the caller
+				// hears the tail of the filler overlap with TTS for a
+				// fraction of a second.
+				logger.Warn("filler PLAYBACK_STOP wait timeout",
+					"call_uuid", callUUID, "path", filepath.Base(path))
+			}
+			r.playbackStops.Delete(path)
+		}
+		return stop, true
+	})
+}
+
+// fillerPlayerFunc adapts a function to the FillerPlayer interface.
+type fillerPlayerFunc func(ctx context.Context, callUUID, voiceID string) (func(), bool)
+
+func (f fillerPlayerFunc) Play(ctx context.Context, callUUID, voiceID string) (func(), bool) {
+	return f(ctx, callUUID, voiceID)
 }
 
 // playbackHandle wraps an *os.File so Close cleans up the FIFO file too.
@@ -406,9 +466,13 @@ func (r *SessionRunner) Run(parent context.Context, opts RunOpts) (retErr error)
 	if opts.Bot != nil {
 		p.BargeIn = opts.Bot.BargeInEnabled
 		p.BargeMinWords = opts.Bot.BargeInMinWords
+		p.Cfg.FillerEnabled = opts.Bot.FillerEnabled
 	}
 	p.ESL = r.ESL // satisfies bargeESL interface
 	p.PlaybackOpen = playbackOpen
+	if r.Filler != nil {
+		p.Filler = r.makeFillerPlayer(logger)
+	}
 
 	// Greeting turn (empty user message → bot decides based on history).
 	// We pass src so Speak can drain the recording FIFO during the 5+ s

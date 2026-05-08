@@ -58,6 +58,11 @@ type Config struct {
 	ASRSpeechTimeout  time.Duration // post-speech trailing silence → text IsFinal
 	ASRSpeechMax      time.Duration // hard cap on a single utterance
 	ASRSingleSentence bool          // hint to provider for utterance segmentation
+
+	// FillerEnabled triggers the per-call filler audio (uhm/dạ vâng) while
+	// the bot is composing a reply. Only kicks in when Pipeline.Filler is
+	// also wired and the voice has at least one filler file.
+	FillerEnabled bool
 }
 
 // Defaults returns a config suitable for the HCC scenario at 8kHz.
@@ -114,6 +119,11 @@ type Pipeline struct {
 	// directly via the SinkOverride below.
 	PlaybackOpen PlaybackOpener
 
+	// Filler plays a short audio file via uuid_broadcast while the bot
+	// is computing the first sentence. Stopped + drained when the first
+	// TTS audio frame arrives. nil-safe (no filler).
+	Filler FillerPlayer
+
 	// SinkOverride bypasses PlaybackOpen — used by offline-cli + tests
 	// where the sink is just an in-memory buffer or file.
 	SinkOverride AudioSink
@@ -152,6 +162,14 @@ func (p *Pipeline) History() []TurnRecord {
 // without dragging in the freeswitch package.
 type bargeESL interface {
 	StopPlayback(uuid string) error
+}
+
+// FillerPlayer plays a single random filler audio file for a given voice.
+// Returns a Stop func that uuid_breaks the playback and waits for FS to
+// confirm via PLAYBACK_STOP. ok==false when no filler file is available
+// (no folder, empty folder, or voice not configured) — caller skips.
+type FillerPlayer interface {
+	Play(ctx context.Context, callUUID, voiceID string) (stop func(), ok bool)
 }
 
 func New(uuid string, cfg Config, a asr.Client, t tts.Client, b bot.Client, v vad.Detector) *Pipeline {
@@ -369,16 +387,43 @@ readLoop:
 func (p *Pipeline) Speak(ctx context.Context, src AudioSource, sinkArg AudioSink, message string) (bot.Action, error) {
 	startedAt := time.Now()
 
-	// Resolve the per-utterance sink. Live FS path: open via PlaybackOpen
-	// (mkfifo + uuid_broadcast + O_WRONLY). Offline/tests: use SinkOverride
-	// or the explicit sinkArg.
-	sink, sinkCloser, err := p.resolveSink(ctx, sinkArg)
-	if err != nil {
-		return "", fmt.Errorf("playback open: %w", err)
+	// Sink resolution is split: offline/tests resolve eagerly so the rest
+	// of Speak runs unchanged. The live FS path defers the sink (and its
+	// uuid_broadcast) until the first TTS audio frame arrives — giving
+	// the filler audio room to play in the meantime without queueing
+	// against the TTS FIFO.
+	var (
+		sink       AudioSink
+		sinkCloser io.Closer
+	)
+	useLazySink := p.SinkOverride == nil && sinkArg == nil && p.PlaybackOpen != nil
+	if !useLazySink {
+		s, c, err := p.resolveSink(ctx, sinkArg)
+		if err != nil {
+			return "", fmt.Errorf("playback open: %w", err)
+		}
+		sink, sinkCloser = s, c
 	}
-	if sinkCloser != nil {
-		defer sinkCloser.Close()
+	defer func() {
+		if sinkCloser != nil {
+			sinkCloser.Close()
+		}
+	}()
+
+	// Filler: only kicks in on the lazy-sink path (real FS calls), only
+	// for non-greeting turns (greeting has no latency to mask), and only
+	// when the bot has filler enabled + a configured pool.
+	var fillerStop func()
+	if useLazySink && message != "" && p.Cfg.FillerEnabled && p.Filler != nil {
+		if stop, ok := p.Filler.Play(ctx, p.UUID, p.Cfg.VoiceID); ok {
+			fillerStop = stop
+		}
 	}
+	defer func() {
+		if fillerStop != nil {
+			fillerStop()
+		}
+	}()
 
 	// bot.turn covers the LLM call (request → action). Lifetime extends past
 	// the sentence pump because Action() blocks until the HTTP stream closes.
@@ -462,6 +507,12 @@ func (p *Pipeline) Speak(ctx context.Context, src AudioSource, sinkArg AudioSink
 
 	// Drain TTS audio in parallel with sentence push so we don't block
 	// upstream sentence flushing on slow sink writes.
+	//
+	// On the lazy-sink path the sink is opened HERE on the first frame:
+	// we stop any in-flight filler (uuid_break + wait PLAYBACK_STOP),
+	// THEN open the TTS FIFO. Order matters — opening the FIFO before
+	// the filler is broken means FreeSWITCH would queue the FIFO behind
+	// the filler and the FIFO writer would block until the filler drains.
 	audioErr := make(chan error, 1)
 	var firstAudioAt time.Duration
 	var bytesOut int
@@ -472,6 +523,19 @@ func (p *Pipeline) Speak(ctx context.Context, src AudioSource, sinkArg AudioSink
 				firstAudioAt = time.Since(startedAt)
 				addEventMs(ttsSpan, "first_audio", firstAudioAt.Milliseconds())
 				recordStage(p.Metrics, "tts.first_audio", p.Scenario, firstAudioAt.Seconds())
+			}
+			if sink == nil {
+				if fillerStop != nil {
+					fillerStop()
+					fillerStop = nil
+				}
+				s, c, err := p.resolveSink(ctx, nil)
+				if err != nil {
+					audioErr <- fmt.Errorf("playback open: %w", err)
+					return
+				}
+				sink = s
+				sinkCloser = c
 			}
 			if _, err := sink.Write(frame); err != nil {
 				audioErr <- fmt.Errorf("sink write: %w", err)

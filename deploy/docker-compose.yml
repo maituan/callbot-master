@@ -60,6 +60,7 @@ services:
       MASTER_RECORDING_ARCHIVE_DIR: "${MASTER_RECORDING_ARCHIVE_DIR:-/var/lib/callbot/recordings}"
       MASTER_RECORDING_URL_PREFIX: "${MASTER_RECORDING_URL_PREFIX:-/recordings}"
       MASTER_RECORDING_FILE_EXT: "${MASTER_RECORDING_FILE_EXT:-.mp3}"
+      MASTER_FILLER_DIR: "${MASTER_FILLER_DIR:-/var/lib/callbot/fillers}"
       MASTER_LOG_LEVEL: "${MASTER_LOG_LEVEL:-info}"
       MASTER_LOG_FORMAT: "${MASTER_LOG_FORMAT:-json}"
       # Set to the UI origin (e.g. http://localhost:3001) when running the
@@ -82,6 +83,8 @@ services:
       - /var/lib/freeswitch/recordings:/var/lib/freeswitch/recordings:ro
       # Persistent archive — master writes here; HTTP serves under /recordings.
       - /var/lib/callbot/recordings:/var/lib/callbot/recordings
+      # Filler audio per voice — read-only. Layout: {voice_id}/*.wav.
+      - /var/lib/callbot/fillers:/var/lib/callbot/fillers:ro
     depends_on:
       postgres:
         condition: service_healthy

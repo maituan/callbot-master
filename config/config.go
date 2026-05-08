@@ -151,7 +151,10 @@ type BargeInConfig struct {
 }
 
 type FillerConfig struct {
-	Enabled bool `yaml:"enabled"`
+	Enabled bool   `yaml:"enabled"`
+	// Dir is the base directory where filler audio files live, organised
+	// per voice: `{Dir}/{voice_id}/*.wav` (or .mp3). Empty disables.
+	Dir string `yaml:"dir"`
 }
 
 type PostgresConfig struct {
@@ -262,7 +265,7 @@ func defaults() *Config {
 			Scenario:      "hcc-inbound",
 		},
 		BargeIn:   BargeInConfig{Enabled: false, MinWords: 3},
-		Filler:    FillerConfig{Enabled: false},
+		Filler:    FillerConfig{Enabled: false, Dir: "/var/lib/callbot/fillers"},
 		Recording: RecordingConfig{
 			SourceDir:  "/var/lib/freeswitch/recordings/voiceai-hotline",
 			ArchiveDir: "/var/lib/callbot/recordings",
@@ -305,6 +308,7 @@ func applyEnvOverrides(c *Config) {
 	envBool("MASTER_BARGE_IN", &c.BargeIn.Enabled)
 	envInt("MASTER_BARGE_MIN_WORDS", &c.BargeIn.MinWords)
 	envBool("MASTER_FILLER", &c.Filler.Enabled)
+	envStr("MASTER_FILLER_DIR", &c.Filler.Dir)
 	// OTEL standard env vars take precedence; fallback to MASTER_OTEL_*.
 	if v := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"); v != "" {
 		c.Telemetry.Endpoint = v

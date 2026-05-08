@@ -24,6 +24,7 @@ import (
 	"callbot-master/internal/freeswitch"
 	"callbot-master/internal/metrics"
 	"callbot-master/internal/pipeline"
+	"callbot-master/internal/filler"
 	"callbot-master/internal/recording"
 	"callbot-master/internal/registry"
 	"callbot-master/internal/session"
@@ -184,6 +185,15 @@ func main() {
 	pCfg.ASRSpeechTimeout = cfg.ASR.SpeechTimeout
 	pCfg.ASRSpeechMax = cfg.ASR.SpeechMax
 
+	// Filler pool: discover {Filler.Dir}/{voice_id}/*.wav lazily when each
+	// call resolves a voice. Enabled per-bot via the FillerEnabled flag;
+	// dir-empty/missing degrades to silent (no filler) without erroring.
+	var fillerPool *filler.Pool
+	if cfg.Filler.Dir != "" {
+		fillerPool = filler.NewPool(cfg.Filler.Dir)
+		slog.Info("filler pool ready", "base_dir", cfg.Filler.Dir)
+	}
+
 	runner := &pipeline.SessionRunner{
 		ESL:          esl,
 		Sessions:     manager,
@@ -193,6 +203,7 @@ func main() {
 		FrameBytes:   cfg.Audio.FrameSamples * 2, // S16LE → 2 bytes per sample
 		PipelineCfg:  pCfg,
 		Metrics:      mc,
+		Filler:       fillerPool,
 	}
 	if pgStore != nil {
 		runner.Store = pgStore
