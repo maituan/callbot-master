@@ -28,6 +28,23 @@ type Config struct {
 	Telemetry   TelemetryConfig   `yaml:"telemetry"`
 	Log         LogConfig         `yaml:"log"`
 	Auth        AuthConfig        `yaml:"auth"`
+	Web         WebConfig         `yaml:"web"`
+}
+
+// WebConfig wires the public chat + voice playground served at /play/<token>.
+// Voice runs at 16 kHz (better quality than the 8 kHz phone pipeline) — the
+// ASR endpoint is provider-specific (Viettel exposes a different port).
+type WebConfig struct {
+	// Voice ASR overrides for 16 kHz. Token reuses the per-bot ASRToken.
+	VoiceASREndpoint    string `yaml:"voice_asr_endpoint"`     // 103.253.20.28:9112
+	VoiceASRSampleRate  int    `yaml:"voice_asr_sample_rate"`  // 16000
+	VoiceTTSResampleRate int   `yaml:"voice_tts_resample_rate"` // 16000
+	// VoiceRecordingDir, when non-empty, dumps each TTS turn's PCM as
+	// WAV under <dir>/<bot_id>/<session_id>/<idx>.wav so QC can listen.
+	VoiceRecordingDir string `yaml:"voice_recording_dir"` // /var/lib/callbot/web-recordings
+	// ShareTTL is the default lifetime of a freshly-minted bot-share
+	// token. Override per-mint via {"ttl_hours": N}; capped at 30 days.
+	ShareTTL time.Duration `yaml:"share_ttl"`
 }
 
 // AuthConfig holds JWT + bootstrap admin settings. The platform admin
@@ -307,6 +324,13 @@ func defaults() *Config {
 			// JWTSecret + PlatformAdminPassword have NO default — operator must set them.
 			// Master refuses to start with auth enabled if either is empty.
 		},
+		Web: WebConfig{
+			VoiceASREndpoint:     "103.253.20.28:9112",
+			VoiceASRSampleRate:   16000,
+			VoiceTTSResampleRate: 16000,
+			VoiceRecordingDir:    "/var/lib/callbot/web-recordings",
+			ShareTTL:             7 * 24 * time.Hour,
+		},
 	}
 }
 
@@ -353,6 +377,11 @@ func applyEnvOverrides(c *Config) {
 	envStr("MASTER_RECORDING_ARCHIVE_DIR", &c.Recording.ArchiveDir)
 	envStr("MASTER_RECORDING_URL_PREFIX", &c.Recording.URLPrefix)
 	envStr("MASTER_RECORDING_FILE_EXT", &c.Recording.FileExt)
+	envStr("MASTER_WEB_ASR_ENDPOINT", &c.Web.VoiceASREndpoint)
+	envInt("MASTER_WEB_ASR_RATE", &c.Web.VoiceASRSampleRate)
+	envInt("MASTER_WEB_TTS_RESAMPLE_RATE", &c.Web.VoiceTTSResampleRate)
+	envStr("MASTER_WEB_RECORDING_DIR", &c.Web.VoiceRecordingDir)
+	envDur("MASTER_WEB_SHARE_TTL", &c.Web.ShareTTL)
 	envStr("MASTER_JWT_SECRET", &c.Auth.JWTSecret)
 	envDur("MASTER_JWT_TTL", &c.Auth.JWTTTL)
 	envStr("MASTER_PLATFORM_ADMIN_USER", &c.Auth.PlatformAdminUser)

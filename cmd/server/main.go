@@ -20,6 +20,7 @@ import (
 	"callbot-master/config"
 	"callbot-master/internal/api"
 	"callbot-master/internal/auth"
+	"callbot-master/internal/bot"
 	"callbot-master/internal/campaign"
 	"callbot-master/internal/freeswitch"
 	"callbot-master/internal/metrics"
@@ -303,6 +304,20 @@ func main() {
 				// TTL=0 → 7 days default. Override per-mint via
 				// {"ttl_hours": N} body param (capped at 30 days).
 			})
+			api.RegisterWeb(router.Mux(), api.WebDeps{
+				Issuer: issuer,
+				Store:  pgStore,
+				ChatTTL: cfg.Web.ShareTTL,
+				BotFactory: func(b *store.BotConfig) (bot.Client, error) {
+					first := b.BotFirstByteTimeout()
+					total := b.BotTotalTimeout()
+					return bot.NewHTTPClient(b.BotURL, first, total), nil
+				},
+				VoiceASREndpoint:     cfg.Web.VoiceASREndpoint,
+				VoiceASRSampleRate:   cfg.Web.VoiceASRSampleRate,
+				VoiceTTSResampleRate: cfg.Web.VoiceTTSResampleRate,
+				VoiceRecordingDir:    cfg.Web.VoiceRecordingDir,
+			})
 		}
 	} else {
 		api.RegisterBots(router.Mux(), api.BotsDeps{}) // 503 stubs
@@ -311,6 +326,12 @@ func main() {
 	// Serve archived recordings under URLPrefix from ArchiveDir.
 	if archiver != nil && cfg.Recording.URLPrefix != "" {
 		router.MountStaticDir(cfg.Recording.URLPrefix, cfg.Recording.ArchiveDir)
+	}
+	// Serve web playground recordings (TTS WAV per turn) so QC can
+	// listen back. Auth-gated via the JWT middleware (auth-required;
+	// not in the bypass list above).
+	if cfg.Web.VoiceRecordingDir != "" {
+		router.MountStaticDir("/web-recordings", cfg.Web.VoiceRecordingDir)
 	}
 	srv := &http.Server{
 		Addr:              cfg.Server.HTTPAddr,

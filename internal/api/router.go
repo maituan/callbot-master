@@ -82,7 +82,13 @@ func authChain(issuer *auth.Issuer, mux *http.ServeMux) http.Handler {
 			p == "/health" || p == "/metrics" ||
 			strings.HasPrefix(p, "/recordings/") ||
 			p == "/api/v1/auth/login" ||
-			(r.Method == http.MethodGet && strings.HasPrefix(p, "/api/v1/share/calls/")) {
+			(r.Method == http.MethodGet && strings.HasPrefix(p, "/api/v1/share/calls/")) ||
+			// Web playground public surfaces — token-in-URL is the auth.
+			// Covers GET /api/v1/web/bot/{token}, GET /api/v1/web/voice/{token},
+			// POST /api/v1/web/chat/{token}.
+			strings.HasPrefix(p, "/api/v1/web/bot/") ||
+			strings.HasPrefix(p, "/api/v1/web/chat/") ||
+			strings.HasPrefix(p, "/api/v1/web/voice/") {
 			mux.ServeHTTP(w, r)
 			return
 		}
