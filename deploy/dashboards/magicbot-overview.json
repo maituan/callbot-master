@@ -50,7 +50,7 @@
         }
       },
       "targets": [{
-        "expr": "histogram_quantile(0.95, sum by (le) (rate(master_turn_duration_seconds_bucket{stage=\"bot.first_sentence\"}[5m])))",
+        "expr": "histogram_quantile(0.95, sum by (le) (rate(master_stage_latency_seconds_bucket{stage=\"bot.first_sentence\"}[5m])))",
         "refId": "A"
       }]
     },
@@ -70,7 +70,7 @@
         }
       },
       "targets": [{
-        "expr": "histogram_quantile(0.95, sum by (le) (rate(master_turn_duration_seconds_bucket{stage=\"tts.first_audio\"}[5m])))",
+        "expr": "histogram_quantile(0.95, sum by (le) (rate(master_stage_latency_seconds_bucket{stage=\"tts.first_audio\"}[5m])))",
         "refId": "A"
       }]
     },
@@ -90,7 +90,7 @@
         }
       },
       "targets": [{
-        "expr": "histogram_quantile(0.95, sum by (le) (rate(master_turn_duration_seconds_bucket{stage=\"caller.wait\"}[5m])))",
+        "expr": "histogram_quantile(0.95, sum by (le) (rate(master_stage_latency_seconds_bucket{stage=\"caller.wait\"}[5m])))",
         "refId": "A"
       }]
     },
@@ -115,12 +115,12 @@
       "fieldConfig": { "defaults": { "unit": "s" } },
       "targets": [
         {
-          "expr": "histogram_quantile(0.5, sum by (stage, le) (rate(master_turn_duration_seconds_bucket[5m])))",
+          "expr": "histogram_quantile(0.5, sum by (stage, le) (rate(master_stage_latency_seconds_bucket[5m])))",
           "legendFormat": "p50 {{stage}}",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (stage, le) (rate(master_turn_duration_seconds_bucket[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (stage, le) (rate(master_stage_latency_seconds_bucket[5m])))",
           "legendFormat": "p95 {{stage}}",
           "refId": "B"
         }
@@ -161,6 +161,6 @@
   "timezone": "",
   "title": "Magicbot — Overview",
   "uid": "magicbot-overview",
-  "version": 1,
+  "version": 2,
   "weekStart": ""
 }
