@@ -161,12 +161,18 @@ services:
       dockerfile: Dockerfile
       args:
         NEXT_PUBLIC_MASTER_URL: "${UI_MASTER_URL:-http://localhost:18083}"
+        # Sidebar "Dashboard" link target. Leave empty to fall back to
+        # /metrics (raw Prometheus exposition, useful for debugging
+        # scrape config). Point at Grafana for the human-friendly
+        # dashboards.
+        NEXT_PUBLIC_GRAFANA_URL: "${UI_GRAFANA_URL:-}"
     image: callbot-master-ui:dev
     container_name: callbot-master-ui
     network_mode: host
     environment:
       PORT: "${UI_PORT:-3001}"
       NEXT_PUBLIC_MASTER_URL: "${UI_MASTER_URL:-http://localhost:18083}"
+      NEXT_PUBLIC_GRAFANA_URL: "${UI_GRAFANA_URL:-}"
     depends_on:
       - master
     restart: unless-stopped
