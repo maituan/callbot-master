@@ -1,0 +1,15 @@
+apiVersion: 1
+
+# Auto-provision dashboards from /var/lib/grafana/dashboards on every
+# Grafana boot. Drop new JSON files into the same dir and they'll
+# show up under "Magicbot" folder.
+providers:
+  - name: 'Magicbot'
+    orgId: 1
+    folder: 'Magicbot'
+    type: file
+    disableDeletion: false
+    editable: true
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards
