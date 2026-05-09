@@ -69,7 +69,7 @@ func (h *callsHandler) collection(w http.ResponseWriter, r *http.Request) {
 		f.Offset = n
 	}
 	if v := q.Get("since"); v != "" {
-		t, err := time.Parse(time.RFC3339, v)
+		t, err := parseFlexTime(v)
 		if err != nil {
 			writeJSONError(w, http.StatusBadRequest, "since must be RFC3339 (e.g. 2026-05-07T00:00:00Z)")
 			return
@@ -77,7 +77,7 @@ func (h *callsHandler) collection(w http.ResponseWriter, r *http.Request) {
 		f.Since = t
 	}
 	if v := q.Get("until"); v != "" {
-		t, err := time.Parse(time.RFC3339, v)
+		t, err := parseFlexTime(v)
 		if err != nil {
 			writeJSONError(w, http.StatusBadRequest, "until must be RFC3339")
 			return
@@ -117,4 +117,18 @@ func (h *callsHandler) item(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, rec)
+}
+
+// parseFlexTime accepts the two ISO formats common from JS clients:
+//   1. RFC3339          — "2026-05-08T19:50:00Z"           (Go's stdlib)
+//   2. RFC3339Nano      — "2026-05-08T19:50:00.000Z"       (Date.toISOString())
+// JS toISOString always emits the millisecond form; the original
+// RFC3339-only parser silently rejected those, leaving filter.Since
+// zero and producing puzzling empty stats. Try both layouts before
+// giving up.
+func parseFlexTime(v string) (time.Time, error) {
+	if t, err := time.Parse(time.RFC3339, v); err == nil {
+		return t, nil
+	}
+	return time.Parse(time.RFC3339Nano, v)
 }

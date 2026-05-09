@@ -4,7 +4,6 @@ import (
 	"context"
 	"net/http"
 	"strconv"
-	"time"
 
 	"github.com/google/uuid"
 
@@ -59,12 +58,12 @@ func (h *auditHandler) list(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if v := q.Get("since"); v != "" {
-		if t, err := time.Parse(time.RFC3339, v); err == nil {
+		if t, err := parseFlexTime(v); err == nil {
 			filter.Since = t
 		}
 	}
 	if v := q.Get("until"); v != "" {
-		if t, err := time.Parse(time.RFC3339, v); err == nil {
+		if t, err := parseFlexTime(v); err == nil {
 			filter.Until = t
 		}
 	}
