@@ -296,6 +296,14 @@ func main() {
 			DefaultCallerID:   "callbot",
 			DefaultTenantSlug: "hcc",
 		})
+		if issuer != nil {
+			api.RegisterShare(router.Mux(), api.ShareDeps{
+				Issuer: issuer,
+				Store:  pgStore,
+				// TTL=0 → 7 days default. Override per-mint via
+				// {"ttl_hours": N} body param (capped at 30 days).
+			})
+		}
 	} else {
 		api.RegisterBots(router.Mux(), api.BotsDeps{}) // 503 stubs
 	}

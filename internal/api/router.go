@@ -75,10 +75,14 @@ func authChain(issuer *auth.Issuer, mux *http.ServeMux) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := r.URL.Path
 		// CORS preflight + public surface bypass JWT entirely.
+		// Share-fetch (GET only) is public — possession of the
+		// signed token IS the authorisation. Mint (POST) still
+		// goes through auth.
 		if r.Method == http.MethodOptions ||
 			p == "/health" || p == "/metrics" ||
 			strings.HasPrefix(p, "/recordings/") ||
-			p == "/api/v1/auth/login" {
+			p == "/api/v1/auth/login" ||
+			(r.Method == http.MethodGet && strings.HasPrefix(p, "/api/v1/share/calls/")) {
 			mux.ServeHTTP(w, r)
 			return
 		}
