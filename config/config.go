@@ -42,6 +42,15 @@ type WebConfig struct {
 	// VoiceRecordingDir, when non-empty, dumps each TTS turn's PCM as
 	// WAV under <dir>/<bot_id>/<session_id>/<idx>.wav so QC can listen.
 	VoiceRecordingDir string `yaml:"voice_recording_dir"` // /var/lib/callbot/web-recordings
+	// VoiceFillerDir, when non-empty, points at a directory of 16 kHz
+	// mono PCM WAV files keyed by voice_id, layout:
+	//
+	//   {VoiceFillerDir}/{voice_id}/*.wav
+	//
+	// Master picks a random file per turn and streams it as the first
+	// TTS audio after the user finishes speaking — masks the bot-stream
+	// latency so the conversation doesn't feel like it stalls.
+	VoiceFillerDir string `yaml:"voice_filler_dir"` // /var/lib/callbot/web-fillers
 	// ShareTTL is the default lifetime of a freshly-minted bot-share
 	// token. Override per-mint via {"ttl_hours": N}; capped at 30 days.
 	ShareTTL time.Duration `yaml:"share_ttl"`
@@ -329,6 +338,7 @@ func defaults() *Config {
 			VoiceASRSampleRate:   16000,
 			VoiceTTSResampleRate: 16000,
 			VoiceRecordingDir:    "/var/lib/callbot/web-recordings",
+			VoiceFillerDir:       "/var/lib/callbot/web-fillers",
 			ShareTTL:             7 * 24 * time.Hour,
 		},
 	}
@@ -381,6 +391,7 @@ func applyEnvOverrides(c *Config) {
 	envInt("MASTER_WEB_ASR_RATE", &c.Web.VoiceASRSampleRate)
 	envInt("MASTER_WEB_TTS_RESAMPLE_RATE", &c.Web.VoiceTTSResampleRate)
 	envStr("MASTER_WEB_RECORDING_DIR", &c.Web.VoiceRecordingDir)
+	envStr("MASTER_WEB_FILLER_DIR", &c.Web.VoiceFillerDir)
 	envDur("MASTER_WEB_SHARE_TTL", &c.Web.ShareTTL)
 	envStr("MASTER_JWT_SECRET", &c.Auth.JWTSecret)
 	envDur("MASTER_JWT_TTL", &c.Auth.JWTTTL)

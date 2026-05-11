@@ -317,6 +317,7 @@ func main() {
 				VoiceASRSampleRate:   cfg.Web.VoiceASRSampleRate,
 				VoiceTTSResampleRate: cfg.Web.VoiceTTSResampleRate,
 				VoiceRecordingDir:    cfg.Web.VoiceRecordingDir,
+				VoiceFillerDir:       cfg.Web.VoiceFillerDir,
 			})
 		}
 	} else {

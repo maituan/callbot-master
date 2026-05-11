@@ -51,6 +51,11 @@ type WebDeps struct {
 	// VoiceRecordingDir, when non-empty, dumps each TTS turn's PCM as
 	// WAV under <dir>/<session_id>/<idx>.wav so QC can listen back.
 	VoiceRecordingDir string
+
+	// VoiceFillerDir, when non-empty, points at a per-voice folder of
+	// 16 kHz mono PCM WAV files used to mask bot-stream latency on
+	// each non-greeting turn. Layout: <dir>/<voice_id>/*.wav.
+	VoiceFillerDir string
 }
 
 // RegisterWeb mounts:

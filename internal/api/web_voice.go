@@ -163,6 +163,7 @@ func (h *webHandler) voice(w http.ResponseWriter, r *http.Request) {
 		bargeMin:    b.BargeInMinWords,
 		bargeOn:     b.BargeInEnabled,
 		recordDir:   sess.RecordingDir,
+		fillerDir:   h.d.VoiceFillerDir,
 	}
 
 	if err := state.run(r.Context()); err != nil {
@@ -192,6 +193,7 @@ type voiceState struct {
 	bargeMin int
 
 	recordDir string
+	fillerDir string
 
 	writeMu sync.Mutex // serialises sendWS — gorilla disallows concurrent writes
 }
@@ -336,6 +338,13 @@ func (s *voiceState) listen(ctx context.Context, audioCh <-chan []byte) (string,
 func (s *voiceState) runBotTurn(ctx context.Context, audioCh <-chan []byte, turnIdx int, userText string) error {
 	turnCtx, cancelTurn := context.WithCancel(ctx)
 	defer cancelTurn()
+
+	// Filler: while waiting for the bot's first sentence, blast a
+	// random pre-recorded "uhm" / "dạ vâng" so the gap doesn't feel
+	// dead. Skipped on greeting turns since user hasn't spoken yet.
+	if userText != "" && s.fillerDir != "" && s.bot.TTSVoiceID != "" {
+		go s.playFiller(turnCtx)
+	}
 
 	// Bot stream.
 	conversationID := "web-" + s.sess.ID.String()
@@ -489,6 +498,65 @@ func (s *voiceState) runBotTurn(ctx context.Context, audioCh <-chan []byte, turn
 		return errEndCall
 	}
 	return nil
+}
+
+// playFiller streams a random filler WAV (PCM16 mono 16 kHz) for the
+// bot's voice from <fillerDir>/<voice_id>/. Sent as tts_audio frames so
+// the browser plays them through the same queue as real TTS; the queue
+// keeps real TTS ordered AFTER the filler, no overlap. Aborts on ctx
+// cancel (e.g. when barge-in collapses the turn).
+//
+// File format assumed: canonical RIFF/WAVE with 44-byte header. Files
+// with extra chunks before "data" will play with a brief artifact at
+// the start — acceptable since filler is short by design.
+func (s *voiceState) playFiller(ctx context.Context) {
+	dir := filepath.Join(s.fillerDir, s.bot.TTSVoiceID)
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) == 0 {
+		return
+	}
+	// Filter to *.wav only.
+	wavs := entries[:0]
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if len(name) < 4 || (name[len(name)-4:] != ".wav" && name[len(name)-4:] != ".WAV") {
+			continue
+		}
+		wavs = append(wavs, e)
+	}
+	if len(wavs) == 0 {
+		return
+	}
+	pick := wavs[int(time.Now().UnixNano())%len(wavs)]
+	path := filepath.Join(dir, pick.Name())
+	body, err := os.ReadFile(path)
+	if err != nil || len(body) <= 44 {
+		s.logger.Debug("filler read", "path", path, "err", err)
+		return
+	}
+	// Skip the 44-byte canonical WAV header.
+	pcm := body[44:]
+	// Stream in 20 ms chunks @ 16 kHz mono 16-bit = 640 bytes per frame.
+	const chunkBytes = 640
+	for i := 0; i < len(pcm); i += chunkBytes {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		end := i + chunkBytes
+		if end > len(pcm) {
+			end = len(pcm)
+		}
+		_ = s.sendWS(wsFrame{
+			Type:       "tts_audio",
+			PCM:        base64.StdEncoding.EncodeToString(pcm[i:end]),
+			SampleRate: s.ttsRate,
+		})
+	}
 }
 
 // bargeMonitor opens an ASR stream parallel to TTS playback. When a
