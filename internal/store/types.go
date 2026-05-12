@@ -63,7 +63,11 @@ type Turn struct {
 
 // ListFilter narrows GET /api/v1/calls results. Empty fields = no constraint.
 type ListFilter struct {
+	// Phone is the legacy single-value filter (used by the existing
+	// list endpoint + tests). Phones is the multi-value variant the
+	// report export wires through. When both are set, Phones wins.
 	Phone     string
+	Phones    []string
 	Scenario  string
 	Direction string
 	Since     time.Time

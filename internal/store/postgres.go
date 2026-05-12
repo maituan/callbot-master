@@ -140,8 +140,10 @@ func (p *Postgres) List(ctx context.Context, filter ListFilter) ([]*CallRecord, 
 	if limit <= 0 {
 		limit = 50
 	}
-	if limit > 500 {
-		limit = 500
+	// Cap at 5000 — large enough for CSV report export windows but
+	// still bounded so a runaway query can't OOM the master pool.
+	if limit > 5000 {
+		limit = 5000
 	}
 
 	var (
@@ -154,7 +156,9 @@ func (p *Postgres) List(ctx context.Context, filter ListFilter) ([]*CallRecord, 
 		args = append(args, val)
 		i++
 	}
-	if filter.Phone != "" {
+	if len(filter.Phones) > 0 {
+		add("phone = ANY($%d)", filter.Phones)
+	} else if filter.Phone != "" {
 		add("phone = $%d", filter.Phone)
 	}
 	if filter.Scenario != "" {

@@ -82,7 +82,18 @@ func RegisterWeb(mux *http.ServeMux, d WebDeps) {
 	mux.HandleFunc("/api/v1/web/chat/", h.chat)
 	mux.HandleFunc("/api/v1/web/voice/", h.voice)
 	mux.HandleFunc("/api/v1/web/sessions", h.listSessions)
-	mux.HandleFunc("/api/v1/web/sessions/", h.getSession)
+	mux.HandleFunc("/api/v1/web/sessions/", h.dispatchSessionsItem)
+}
+
+// dispatchSessionsItem peels off either /export (CSV report) or a
+// session UUID.
+func (h *webHandler) dispatchSessionsItem(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/api/v1/web/sessions/")
+	if rest == "export" {
+		h.exportSessionsCSV(w, r)
+		return
+	}
+	h.getSession(w, r)
 }
 
 func webDisabled(w http.ResponseWriter, _ *http.Request) {

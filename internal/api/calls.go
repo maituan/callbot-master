@@ -33,6 +33,8 @@ func RegisterCalls(mux *http.ServeMux, d CallsDeps) {
 	h := &callsHandler{d: d}
 	mux.HandleFunc("/api/v1/calls", h.collection)
 	mux.HandleFunc("/api/v1/calls/", h.item)
+	// /api/v1/calls/export is dispatched by h.item (matches the
+	// trailing-slash prefix) — keep wiring centralized there.
 }
 
 type callsHandler struct{ d CallsDeps }
@@ -48,9 +50,22 @@ func (h *callsHandler) collection(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.URL.Query()
 	f := store.ListFilter{
-		Phone:     q.Get("phone"),
 		Scenario:  q.Get("scenario"),
 		Direction: q.Get("direction"),
+	}
+	// Phones: ?phone=a&phone=b OR ?phones=a,b. Fall back to single
+	// phone for back-compat with the original list UI.
+	if vs := q["phone"]; len(vs) > 1 {
+		f.Phones = vs
+	} else if v := q.Get("phones"); v != "" {
+		for _, p := range strings.Split(v, ",") {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				f.Phones = append(f.Phones, p)
+			}
+		}
+	} else {
+		f.Phone = q.Get("phone")
 	}
 	if v := q.Get("limit"); v != "" {
 		n, err := strconv.Atoi(v)
@@ -105,6 +120,11 @@ func (h *callsHandler) item(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.Path, "/api/v1/calls/")
 	if id == "" {
 		writeJSONError(w, http.StatusNotFound, "missing call id")
+		return
+	}
+	// Reserve /api/v1/calls/export for the CSV report download.
+	if id == "export" {
+		h.exportCSV(w, r)
 		return
 	}
 	rec, err := h.d.Store.Get(r.Context(), id)
