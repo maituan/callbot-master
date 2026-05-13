@@ -21,6 +21,7 @@ import (
 	"callbot-master/internal/audio"
 	"callbot-master/internal/bot"
 	"callbot-master/internal/filler"
+	"callbot-master/internal/intent"
 	"callbot-master/internal/freeswitch"
 	"callbot-master/internal/metrics"
 	"callbot-master/internal/recording"
@@ -147,8 +148,8 @@ func (r *SessionRunner) makePlaybackOpener(uuid string, logger *slog.Logger) Pla
 // stop() blocks until FS confirms PLAYBACK_STOP, with a 1.5 s safety
 // timeout — we'd rather drop the wait than deadlock the next TTS open.
 func (r *SessionRunner) makeFillerPlayer(logger *slog.Logger) FillerPlayer {
-	return fillerPlayerFunc(func(ctx context.Context, callUUID, voiceID string) (func(), bool) {
-		path := r.Filler.Pick(voiceID)
+	return fillerPlayerFunc(func(ctx context.Context, callUUID, voiceID string, kind filler.Kind) (func(), bool) {
+		path := r.Filler.PickKind(voiceID, kind)
 		if path == "" {
 			return nil, false
 		}
@@ -191,10 +192,10 @@ func (r *SessionRunner) makeFillerPlayer(logger *slog.Logger) FillerPlayer {
 }
 
 // fillerPlayerFunc adapts a function to the FillerPlayer interface.
-type fillerPlayerFunc func(ctx context.Context, callUUID, voiceID string) (func(), bool)
+type fillerPlayerFunc func(ctx context.Context, callUUID, voiceID string, kind filler.Kind) (func(), bool)
 
-func (f fillerPlayerFunc) Play(ctx context.Context, callUUID, voiceID string) (func(), bool) {
-	return f(ctx, callUUID, voiceID)
+func (f fillerPlayerFunc) Play(ctx context.Context, callUUID, voiceID string, kind filler.Kind) (func(), bool) {
+	return f(ctx, callUUID, voiceID, kind)
 }
 
 // playbackHandle wraps an *os.File so Close cleans up the FIFO file too.
@@ -469,6 +470,36 @@ func (r *SessionRunner) Run(parent context.Context, opts RunOpts) (retErr error)
 		p.BargeIn = opts.Bot.BargeInEnabled
 		p.BargeMinWords = opts.Bot.BargeInMinWords
 		p.Cfg.FillerEnabled = opts.Bot.FillerEnabled
+		// Hybrid filler routing: wire the resolver only when the bot
+		// explicitly opted in AND configured an intent endpoint. Empty
+		// URL → resolver stays nil → pipeline plays short. Same fallback
+		// happens on intent errors via filler_ctrl.
+		if opts.Bot.FillerMode == "hybrid" && opts.Bot.FillerIntentURL != "" {
+			cli := intent.NewHTTPClient(opts.Bot.FillerIntentURL)
+			metricsRef := r.Metrics
+			p.FillerKindResolver = func(ctx context.Context, transcript string) (filler.Kind, error) {
+				started := time.Now()
+				k, err := cli.Classify(ctx, opts.UUID, transcript)
+				if metricsRef != nil {
+					metricsRef.IntentClassifyDuration.WithLabelValues("phone").
+						Observe(time.Since(started).Seconds())
+					outcome := "fallback"
+					switch {
+					case err != nil:
+						outcome = "fallback"
+					case k == intent.KindLong:
+						outcome = "business"
+					case k == intent.KindShort:
+						outcome = "chitchat"
+					}
+					metricsRef.IntentClassifyTotal.WithLabelValues("phone", outcome).Inc()
+				}
+				return filler.Kind(k), err
+			}
+			if opts.Bot.FillerIntentTimeoutMs > 0 {
+				p.Cfg.FillerIntentTimeout = time.Duration(opts.Bot.FillerIntentTimeoutMs) * time.Millisecond
+			}
+		}
 	}
 	p.ESL = r.ESL // satisfies bargeESL interface
 	p.PlaybackOpen = playbackOpen

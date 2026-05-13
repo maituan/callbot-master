@@ -47,6 +47,15 @@ type BotConfig struct {
 	BargeInMinWords int
 	FillerEnabled   bool
 
+	// Filler intent classification — when FillerMode="hybrid" and
+	// FillerIntentURL is set, master POSTs the user transcript to
+	// FillerIntentURL and expects a plain-text BUSINESS/CHITCHAT reply
+	// within FillerIntentTimeoutMs. BUSINESS → long filler, CHITCHAT or
+	// any failure → short. Mode "short" (default) bypasses the API.
+	FillerMode            string // "short" | "hybrid"
+	FillerIntentURL       string
+	FillerIntentTimeoutMs int
+
 	// OutboundPrefix is prepended to the dialed phone before originate
 	// when the phone doesn't already start with it. Routes the call to
 	// the right carrier gateway via the FS dialplan (e.g. "3323" →
@@ -76,6 +85,9 @@ COALESCE(b.tts_voice_id, ''), b.tts_tempo,
 b.asr_silence_timeout_sec, b.asr_speech_timeout_sec, b.asr_speech_max_sec,
 b.asr_single_sentence,
 b.bargein_enabled, b.bargein_min_words, b.filler_enabled,
+COALESCE(b.filler_mode, 'short'),
+COALESCE(b.filler_intent_url, ''),
+COALESCE(b.filler_intent_timeout_ms, 1500),
 COALESCE(b.outbound_prefix, ''),
 b.version, b.created_at, b.updated_at`
 
@@ -236,12 +248,23 @@ INSERT INTO bots (
     tts_voice_id, tts_tempo,
     asr_silence_timeout_sec, asr_speech_timeout_sec, asr_speech_max_sec, asr_single_sentence,
     bargein_enabled, bargein_min_words, filler_enabled,
+    filler_mode, filler_intent_url, filler_intent_timeout_ms,
     outbound_prefix,
     created_by, updated_by
 )
 VALUES ($1,$2,$3,$4, $5,$6,$7, $8,$9,$10, $11,$12,$13,
-        $14,$15, $16,$17,$18,$19, $20,$21,$22, $23, $24,$24)
+        $14,$15, $16,$17,$18,$19, $20,$21,$22,
+        $23,$24,$25,
+        $26, $27,$27)
 RETURNING id`
+	mode := in.FillerMode
+	if mode == "" {
+		mode = "short"
+	}
+	timeout := in.FillerIntentTimeoutMs
+	if timeout == 0 {
+		timeout = 1500
+	}
 	var id uuid.UUID
 	if err := p.pool.QueryRow(ctx, q,
 		in.TenantID, in.Slug, in.Name, in.Enabled,
@@ -251,6 +274,7 @@ RETURNING id`
 		nullStr(in.TTSVoiceID), in.TTSTempo,
 		in.ASRSilenceTimeoutSec, in.ASRSpeechTimeoutSec, in.ASRSpeechMaxSec, in.ASRSingleSentence,
 		in.BargeInEnabled, in.BargeInMinWords, in.FillerEnabled,
+		mode, nullStr(in.FillerIntentURL), timeout,
 		in.OutboundPrefix,
 		in.ActorUserID,
 	).Scan(&id); err != nil {
@@ -289,10 +313,21 @@ UPDATE bots SET
     bargein_enabled            = $21,
     bargein_min_words          = $22,
     filler_enabled             = $23,
-    outbound_prefix            = $24,
+    filler_mode                = $24,
+    filler_intent_url          = $25,
+    filler_intent_timeout_ms   = $26,
+    outbound_prefix            = $27,
     version                    = version + 1,
-    updated_by                 = $25
-WHERE id = $26 AND version = $27 AND deleted_at IS NULL`
+    updated_by                 = $28
+WHERE id = $29 AND version = $30 AND deleted_at IS NULL`
+	mode := in.FillerMode
+	if mode == "" {
+		mode = "short"
+	}
+	timeout := in.FillerIntentTimeoutMs
+	if timeout == 0 {
+		timeout = 1500
+	}
 	tag, err := p.pool.Exec(ctx, q,
 		in.Slug, in.Name, in.Enabled,
 		in.BotURL, in.BotFirstByteTimeoutMs, in.BotTotalTimeoutMs,
@@ -303,6 +338,7 @@ WHERE id = $26 AND version = $27 AND deleted_at IS NULL`
 		nullStr(in.TTSVoiceID), in.TTSTempo,
 		in.ASRSilenceTimeoutSec, in.ASRSpeechTimeoutSec, in.ASRSpeechMaxSec, in.ASRSingleSentence,
 		in.BargeInEnabled, in.BargeInMinWords, in.FillerEnabled,
+		mode, nullStr(in.FillerIntentURL), timeout,
 		in.OutboundPrefix,
 		in.ActorUserID,
 		id, expectedVersion,
@@ -407,6 +443,10 @@ type BotWriteInput struct {
 	BargeInMinWords int
 	FillerEnabled   bool
 
+	FillerMode            string
+	FillerIntentURL       string
+	FillerIntentTimeoutMs int
+
 	OutboundPrefix string
 
 	ActorUserID *uuid.UUID
@@ -474,6 +514,7 @@ func scanBot(row scannable) (*BotConfig, error) {
 		&b.ASRSilenceTimeoutSec, &b.ASRSpeechTimeoutSec, &b.ASRSpeechMaxSec,
 		&b.ASRSingleSentence,
 		&b.BargeInEnabled, &b.BargeInMinWords, &b.FillerEnabled,
+		&b.FillerMode, &b.FillerIntentURL, &b.FillerIntentTimeoutMs,
 		&b.OutboundPrefix,
 		&b.Version, &b.CreatedAt, &b.UpdatedAt,
 	); err != nil {

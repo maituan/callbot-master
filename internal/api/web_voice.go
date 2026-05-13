@@ -22,6 +22,8 @@ import (
 	"callbot-master/internal/asr"
 	"callbot-master/internal/auth"
 	"callbot-master/internal/bot"
+	"callbot-master/internal/intent"
+	"callbot-master/internal/metrics"
 	"callbot-master/internal/store"
 	"callbot-master/internal/tts"
 )
@@ -164,6 +166,7 @@ func (h *webHandler) voice(w http.ResponseWriter, r *http.Request) {
 		bargeOn:     b.BargeInEnabled,
 		recordDir:   sess.RecordingDir,
 		fillerDir:   h.d.VoiceFillerDir,
+		metrics:     h.d.Metrics,
 	}
 
 	if err := state.run(r.Context()); err != nil {
@@ -194,6 +197,8 @@ type voiceState struct {
 
 	recordDir string
 	fillerDir string
+
+	metrics *metrics.Collectors
 
 	writeMu sync.Mutex // serialises sendWS — gorilla disallows concurrent writes
 }
@@ -342,8 +347,11 @@ func (s *voiceState) runBotTurn(ctx context.Context, audioCh <-chan []byte, turn
 	// Filler: while waiting for the bot's first sentence, blast a
 	// random pre-recorded "uhm" / "dạ vâng" so the gap doesn't feel
 	// dead. Skipped on greeting turns since user hasn't spoken yet.
+	// In hybrid mode we classify the transcript first; BUSINESS picks
+	// from <voice>/long/, CHITCHAT or any failure falls back to flat
+	// short pool.
 	if userText != "" && s.fillerDir != "" && s.bot.TTSVoiceID != "" {
-		go s.playFiller(turnCtx)
+		go s.playFiller(turnCtx, userText)
 	}
 
 	// Bot stream.
@@ -501,43 +509,41 @@ func (s *voiceState) runBotTurn(ctx context.Context, audioCh <-chan []byte, turn
 }
 
 // playFiller streams a random filler WAV (PCM16 mono 16 kHz) for the
-// bot's voice from <fillerDir>/<voice_id>/. Sent as tts_audio frames so
-// the browser plays them through the same queue as real TTS; the queue
-// keeps real TTS ordered AFTER the filler, no overlap. Aborts on ctx
-// cancel (e.g. when barge-in collapses the turn).
+// bot's voice. Layout:
 //
-// File format assumed: canonical RIFF/WAVE with 44-byte header. Files
-// with extra chunks before "data" will play with a brief artifact at
-// the start — acceptable since filler is short by design.
-func (s *voiceState) playFiller(ctx context.Context) {
+//   <fillerDir>/<voice_id>/*.wav        short pool (flat, back-compat)
+//   <fillerDir>/<voice_id>/long/*.wav   long pool (hybrid mode only)
+//
+// In hybrid mode the user transcript is sent to the bot's intent
+// endpoint; BUSINESS → long, CHITCHAT or any failure → short. Sent as
+// tts_audio frames so the browser plays them through the same queue
+// as real TTS — real TTS naturally queues after.
+//
+// File format assumed: canonical RIFF/WAVE with 44-byte header.
+func (s *voiceState) playFiller(ctx context.Context, transcript string) {
+	kind := s.resolveFillerKind(ctx, transcript)
+
 	dir := filepath.Join(s.fillerDir, s.bot.TTSVoiceID)
-	entries, err := os.ReadDir(dir)
-	if err != nil || len(entries) == 0 {
-		return
+	if kind == intent.KindLong {
+		dir = filepath.Join(dir, "long")
 	}
-	// Filter to *.wav only.
-	wavs := entries[:0]
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		name := e.Name()
-		if len(name) < 4 || (name[len(name)-4:] != ".wav" && name[len(name)-4:] != ".WAV") {
-			continue
-		}
-		wavs = append(wavs, e)
+	wavs := scanWavs(dir)
+	if len(wavs) == 0 && kind == intent.KindLong {
+		// Long pool missing → fall back to short so the bot never
+		// goes silent waiting for first-sentence.
+		dir = filepath.Join(s.fillerDir, s.bot.TTSVoiceID)
+		wavs = scanWavs(dir)
 	}
 	if len(wavs) == 0 {
 		return
 	}
 	pick := wavs[int(time.Now().UnixNano())%len(wavs)]
-	path := filepath.Join(dir, pick.Name())
+	path := filepath.Join(dir, pick)
 	body, err := os.ReadFile(path)
 	if err != nil || len(body) <= 44 {
 		s.logger.Debug("filler read", "path", path, "err", err)
 		return
 	}
-	// Skip the 44-byte canonical WAV header.
 	pcm := body[44:]
 	// Stream in 20 ms chunks @ 16 kHz mono 16-bit = 640 bytes per frame.
 	const chunkBytes = 640
@@ -557,6 +563,68 @@ func (s *voiceState) playFiller(ctx context.Context) {
 			SampleRate: s.ttsRate,
 		})
 	}
+}
+
+// resolveFillerKind asks the intent endpoint when the bot opted into
+// hybrid mode. Errors / timeout / non-hybrid mode all collapse to
+// short — the pipeline should never block on intent.
+func (s *voiceState) resolveFillerKind(ctx context.Context, transcript string) intent.Kind {
+	if s.bot.FillerMode != "hybrid" || s.bot.FillerIntentURL == "" || transcript == "" {
+		return intent.KindShort
+	}
+	timeout := time.Duration(s.bot.FillerIntentTimeoutMs) * time.Millisecond
+	if timeout <= 0 {
+		timeout = 1500 * time.Millisecond
+	}
+	c := intent.NewHTTPClient(s.bot.FillerIntentURL)
+	classifyCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	started := time.Now()
+	kind, err := c.Classify(classifyCtx, "web-"+s.sess.ID.String(), transcript)
+	if s.metrics != nil {
+		s.metrics.IntentClassifyDuration.WithLabelValues("web").
+			Observe(time.Since(started).Seconds())
+		outcome := "fallback"
+		switch {
+		case err != nil:
+			outcome = "fallback"
+		case kind == intent.KindLong:
+			outcome = "business"
+		case kind == intent.KindShort:
+			outcome = "chitchat"
+		}
+		s.metrics.IntentClassifyTotal.WithLabelValues("web", outcome).Inc()
+	}
+	if err != nil {
+		s.logger.Debug("intent classify", "err", err)
+		return intent.KindShort
+	}
+	return kind
+}
+
+// scanWavs returns base-names of *.wav files at dir, excluding subdirs.
+// Returns nil on any error.
+func scanWavs(dir string) []string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if len(name) < 4 {
+			continue
+		}
+		ext := name[len(name)-4:]
+		if ext != ".wav" && ext != ".WAV" {
+			continue
+		}
+		out = append(out, name)
+	}
+	return out
 }
 
 // bargeMonitor opens an ASR stream parallel to TTS playback. When a

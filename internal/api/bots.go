@@ -425,6 +425,9 @@ func botDetail(b *store.BotConfig) map[string]any {
 	out["asr_single_sentence"] = b.ASRSingleSentence
 	out["bargein_min_words"] = b.BargeInMinWords
 	out["filler_enabled"] = b.FillerEnabled
+	out["filler_mode"] = b.FillerMode
+	out["filler_intent_url"] = b.FillerIntentURL
+	out["filler_intent_timeout_ms"] = b.FillerIntentTimeoutMs
 	out["outbound_prefix"] = b.OutboundPrefix
 	out["created_at"] = b.CreatedAt
 	return out
@@ -488,6 +491,10 @@ type botWriteRequest struct {
 	BargeInMinWords int   `json:"bargein_min_words"`
 	FillerEnabled   *bool `json:"filler_enabled,omitempty"`
 
+	FillerMode            string `json:"filler_mode,omitempty"`
+	FillerIntentURL       string `json:"filler_intent_url,omitempty"`
+	FillerIntentTimeoutMs int    `json:"filler_intent_timeout_ms,omitempty"`
+
 	OutboundPrefix string `json:"outbound_prefix"`
 
 	Version *int `json:"version,omitempty"` // required on UPDATE
@@ -538,9 +545,24 @@ func (req *botWriteRequest) toWriteInput(tenantID uuid.UUID, actor *uuid.UUID, f
 		BargeInEnabled:        coalesceBool(req.BargeInEnabled, true),
 		BargeInMinWords:       defaultInt(req.BargeInMinWords, 3),
 		FillerEnabled:         coalesceBool(req.FillerEnabled, false),
+		FillerMode:            normalizeFillerMode(req.FillerMode),
+		FillerIntentURL:       req.FillerIntentURL,
+		FillerIntentTimeoutMs: defaultInt(req.FillerIntentTimeoutMs, 1500),
 		OutboundPrefix:        req.OutboundPrefix,
 		ActorUserID:           actor,
 	}, nil
+}
+
+// normalizeFillerMode forces unknown values back to "short" — the DB
+// CHECK constraint would reject them otherwise, and "short" is the safe
+// default that matches the original single-pool behaviour.
+func normalizeFillerMode(s string) string {
+	switch s {
+	case "hybrid":
+		return "hybrid"
+	default:
+		return "short"
+	}
 }
 
 func coalesceBool(p *bool, def bool) bool {

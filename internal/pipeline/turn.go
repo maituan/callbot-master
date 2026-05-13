@@ -25,6 +25,7 @@ import (
 	"callbot-master/internal/asr"
 	"callbot-master/internal/audio"
 	"callbot-master/internal/bot"
+	"callbot-master/internal/filler"
 	"callbot-master/internal/metrics"
 	"callbot-master/internal/tts"
 	"callbot-master/internal/vad"
@@ -63,6 +64,11 @@ type Config struct {
 	// the bot is composing a reply. Only kicks in when Pipeline.Filler is
 	// also wired and the voice has at least one filler file.
 	FillerEnabled bool
+
+	// FillerIntentTimeout caps the wait on Pipeline.FillerKindResolver
+	// before falling back to short. Zero disables the deadline and
+	// trusts the resolver to honour its own ctx.
+	FillerIntentTimeout time.Duration
 }
 
 // Defaults returns a config suitable for the HCC scenario at 8kHz.
@@ -119,10 +125,17 @@ type Pipeline struct {
 	// directly via the SinkOverride below.
 	PlaybackOpen PlaybackOpener
 
-	// Filler plays a short audio file via uuid_broadcast while the bot
-	// is computing the first sentence. Stopped + drained when the first
-	// TTS audio frame arrives. nil-safe (no filler).
+	// Filler plays a short / long audio file via uuid_broadcast while
+	// the bot is computing the first sentence. Stopped + drained when
+	// the first TTS audio frame arrives. nil-safe (no filler).
 	Filler FillerPlayer
+
+	// FillerKindResolver, if set, classifies the user transcript into a
+	// filler.Kind (short / long). The pipeline kicks it off in a
+	// goroutine and races the result against the bot's first sentence:
+	// whichever wins decides the filler. Nil → always short.
+	// Errors from the resolver are interpreted as "use short".
+	FillerKindResolver func(ctx context.Context, transcript string) (filler.Kind, error)
 
 	// SinkOverride bypasses PlaybackOpen — used by offline-cli + tests
 	// where the sink is just an in-memory buffer or file.
@@ -177,12 +190,14 @@ type bargeESL interface {
 	StopPlayback(uuid string) error
 }
 
-// FillerPlayer plays a single random filler audio file for a given voice.
-// Returns a Stop func that uuid_breaks the playback and waits for FS to
-// confirm via PLAYBACK_STOP. ok==false when no filler file is available
-// (no folder, empty folder, or voice not configured) — caller skips.
+// FillerPlayer plays a single random filler audio file of the requested
+// kind for a given voice. Returns a Stop func that uuid_breaks the
+// playback and waits for FS to confirm via PLAYBACK_STOP. ok==false
+// when no filler file is available (no folder, empty folder, voice not
+// configured, or the requested kind bank is empty and the player
+// chooses not to fall back) — caller skips.
 type FillerPlayer interface {
-	Play(ctx context.Context, callUUID, voiceID string) (stop func(), ok bool)
+	Play(ctx context.Context, callUUID, voiceID string, kind filler.Kind) (stop func(), ok bool)
 }
 
 func New(uuid string, cfg Config, a asr.Client, t tts.Client, b bot.Client, v vad.Detector) *Pipeline {
@@ -436,17 +451,22 @@ func (p *Pipeline) Speak(ctx context.Context, src AudioSource, sinkArg AudioSink
 	// Filler: only kicks in on the lazy-sink path (real FS calls), only
 	// for non-greeting turns (greeting has no latency to mask), and only
 	// when the bot has filler enabled + a configured pool.
-	var fillerStop func()
-	if useLazySink && message != "" && p.Cfg.FillerEnabled && p.Filler != nil {
-		if stop, ok := p.Filler.Play(ctx, p.UUID, p.Cfg.VoiceID); ok {
-			fillerStop = stop
-		}
-	}
-	defer func() {
-		if fillerStop != nil {
-			fillerStop()
-		}
-	}()
+	//
+	// The decision (kind=short vs long) runs ASYNCHRONOUSLY so the main
+	// flow can keep wiring bot.Stream + TTS + sentence pump. The
+	// controller races three signals:
+	//
+	//   1. FillerKindResolver returns (intent classification done)
+	//   2. firstSentenceCh closes (bot is fast — skip filler entirely)
+	//   3. FillerIntentTimeout fires (fall back to short)
+	//
+	// Whoever wins decides; once decided, Filler.Play happens inside
+	// the controller goroutine and the resulting stop fn lands in
+	// fillerCtrl. The main flow calls fillerCtrl.Cancel() on first TTS
+	// frame (still works whether or not the controller has decided).
+	firstSentenceCh := make(chan struct{})
+	fillerCtrl := newFillerController(ctx, p, message, useLazySink, firstSentenceCh)
+	defer fillerCtrl.Cancel()
 
 	// bot.turn covers the LLM call (request → action). Lifetime extends past
 	// the sentence pump because Action() blocks until the HTTP stream closes.
@@ -554,10 +574,11 @@ func (p *Pipeline) Speak(ctx context.Context, src AudioSource, sinkArg AudioSink
 				recordStage(p.Metrics, "tts.first_audio", p.Scenario, firstAudioAt.Seconds())
 			}
 			if sink == nil {
-				if fillerStop != nil {
-					fillerStop()
-					fillerStop = nil
-				}
+				// Tear down any in-flight filler BEFORE opening the
+				// TTS FIFO. uuid_broadcast queues the FIFO behind a
+				// running filler — if we open first, the FIFO writer
+				// would block until the filler drains.
+				fillerCtrl.Cancel()
 				s, c, err := p.resolveSink(ctx, nil)
 				if err != nil {
 					audioErr <- fmt.Errorf("playback open: %w", err)
@@ -600,6 +621,15 @@ func (p *Pipeline) Speak(ctx context.Context, src AudioSource, sinkArg AudioSink
 				addEventMs(botSpan, "first_sentence", firstSentAt.Milliseconds(),
 					attribute.Int("text_len", len(s)))
 				recordStage(p.Metrics, "bot.first_sentence", p.Scenario, firstSentAt.Seconds())
+				// Signal the filler controller that the bot is fast
+				// enough — if it hasn't picked a kind yet, it will
+				// abandon the filler altogether instead of cueing
+				// audio that gets cut milliseconds later.
+				select {
+				case <-firstSentenceCh:
+				default:
+					close(firstSentenceCh)
+				}
 			}
 			if havePrev {
 				if err := ttsStream.SendText(prev, false); err != nil {

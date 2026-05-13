@@ -13,6 +13,7 @@ import (
 
 	"callbot-master/internal/auth"
 	"callbot-master/internal/bot"
+	"callbot-master/internal/metrics"
 	"callbot-master/internal/store"
 )
 
@@ -54,8 +55,14 @@ type WebDeps struct {
 
 	// VoiceFillerDir, when non-empty, points at a per-voice folder of
 	// 16 kHz mono PCM WAV files used to mask bot-stream latency on
-	// each non-greeting turn. Layout: <dir>/<voice_id>/*.wav.
+	// each non-greeting turn. Layout: <dir>/<voice_id>/*.wav (short)
+	// + <dir>/<voice_id>/long/*.wav (long, hybrid mode).
 	VoiceFillerDir string
+
+	// Metrics is nil-safe — when set the voice handler emits the same
+	// IntentClassifyDuration / IntentClassifyTotal series as the phone
+	// pipeline, tagged with channel="web".
+	Metrics *metrics.Collectors
 }
 
 // RegisterWeb mounts:

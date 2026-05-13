@@ -25,6 +25,16 @@ type Collectors struct {
 	TTSErrorTotal    *prometheus.CounterVec
 	CampaignProgress *prometheus.GaugeVec
 	OriginateTotal   *prometheus.CounterVec
+
+	// IntentClassifyDuration tracks the end-to-end intent classification
+	// latency: master sends transcript, awaits BUSINESS/CHITCHAT label,
+	// resolves filler kind. Watch p95/p99 — if it creeps near the
+	// FillerIntentTimeout the filler effectively becomes short-only.
+	IntentClassifyDuration *prometheus.HistogramVec
+
+	// IntentClassifyTotal counts intent classify results by outcome:
+	// kind ∈ business | chitchat | fallback (any error/timeout/unknown).
+	IntentClassifyTotal *prometheus.CounterVec
 }
 
 // New builds and registers all collectors. Standard process/Go runtime
@@ -81,6 +91,17 @@ func New() *Collectors {
 			Name:      "originate_total",
 			Help:      "Outbound originate attempts grouped by outcome (ok|error).",
 		}, []string{"result"}),
+		IntentClassifyDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Namespace: "master",
+			Name:      "intent_classify_duration_seconds",
+			Help:      "Intent classification latency per request (filler hybrid mode).",
+			Buckets:   []float64{0.05, 0.1, 0.2, 0.4, 0.7, 1, 1.5, 2.5, 4},
+		}, []string{"channel"}), // channel = phone | web
+		IntentClassifyTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "master",
+			Name:      "intent_classify_total",
+			Help:      "Intent classify outcomes grouped by kind (business|chitchat|fallback).",
+		}, []string{"channel", "outcome"}),
 	}
 
 	reg.MustRegister(
@@ -93,6 +114,8 @@ func New() *Collectors {
 		c.TTSErrorTotal,
 		c.CampaignProgress,
 		c.OriginateTotal,
+		c.IntentClassifyDuration,
+		c.IntentClassifyTotal,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
