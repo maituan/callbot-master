@@ -37,9 +37,12 @@ type BotConfig struct {
 	// Provider params
 	TTSVoiceID            string
 	TTSTempo              float64
-	ASRSilenceTimeoutSec  int
-	ASRSpeechTimeoutSec   int
-	ASRSpeechMaxSec       int
+	// ASR*Sec are seconds with sub-second precision (NUMERIC(5,2) on
+	// the DB side). Viettel ASR accepts decimals natively; the
+	// downstream asr.StreamOpts gets ms via *1000.
+	ASRSilenceTimeoutSec  float64
+	ASRSpeechTimeoutSec   float64
+	ASRSpeechMaxSec       float64
 	ASRSingleSentence     bool
 
 	// Behavior
@@ -82,7 +85,8 @@ b.bot_url, b.bot_first_byte_timeout_ms, b.bot_total_timeout_ms,
 b.asr_provider, b.asr_endpoint, COALESCE(b.asr_token, ''),
 b.tts_provider, b.tts_endpoint, COALESCE(b.tts_token, ''),
 COALESCE(b.tts_voice_id, ''), b.tts_tempo,
-b.asr_silence_timeout_sec, b.asr_speech_timeout_sec, b.asr_speech_max_sec,
+-- NUMERIC casts so pgx scans directly into float64 instead of pgtype.Numeric.
+b.asr_silence_timeout_sec::FLOAT8, b.asr_speech_timeout_sec::FLOAT8, b.asr_speech_max_sec::FLOAT8,
 b.asr_single_sentence,
 b.bargein_enabled, b.bargein_min_words, b.filler_enabled,
 COALESCE(b.filler_mode, 'short'),
@@ -434,9 +438,12 @@ type BotWriteInput struct {
 
 	TTSVoiceID            string
 	TTSTempo              float64
-	ASRSilenceTimeoutSec  int
-	ASRSpeechTimeoutSec   int
-	ASRSpeechMaxSec       int
+	// ASR*Sec are seconds with sub-second precision (NUMERIC(5,2) on
+	// the DB side). Viettel ASR accepts decimals natively; the
+	// downstream asr.StreamOpts gets ms via *1000.
+	ASRSilenceTimeoutSec  float64
+	ASRSpeechTimeoutSec   float64
+	ASRSpeechMaxSec       float64
 	ASRSingleSentence     bool
 
 	BargeInEnabled  bool
@@ -492,9 +499,9 @@ type SeedBotInput struct {
 	TTSVoiceID  string
 	TTSTempo    float64
 
-	ASRSilenceTimeoutSec int
-	ASRSpeechTimeoutSec  int
-	ASRSpeechMaxSec      int
+	ASRSilenceTimeoutSec float64
+	ASRSpeechTimeoutSec  float64
+	ASRSpeechMaxSec      float64
 
 	BargeInEnabled  bool
 	BargeInMinWords int

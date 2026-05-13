@@ -446,14 +446,17 @@ func (r *SessionRunner) Run(parent context.Context, opts RunOpts) (retErr error)
 		if opts.Bot.TTSTempo > 0 {
 			pCfg.Tempo = opts.Bot.TTSTempo
 		}
+		// Multiply by float64(Second) instead of `*time.Second` so the
+		// decimal portion of the bot's seconds value isn't truncated by
+		// the implicit float→int64 cast.
 		if opts.Bot.ASRSilenceTimeoutSec > 0 {
-			pCfg.ASRSilenceTimeout = time.Duration(opts.Bot.ASRSilenceTimeoutSec) * time.Second
+			pCfg.ASRSilenceTimeout = time.Duration(opts.Bot.ASRSilenceTimeoutSec * float64(time.Second))
 		}
 		if opts.Bot.ASRSpeechTimeoutSec > 0 {
-			pCfg.ASRSpeechTimeout = time.Duration(opts.Bot.ASRSpeechTimeoutSec) * time.Second
+			pCfg.ASRSpeechTimeout = time.Duration(opts.Bot.ASRSpeechTimeoutSec * float64(time.Second))
 		}
 		if opts.Bot.ASRSpeechMaxSec > 0 {
-			pCfg.ASRSpeechMax = time.Duration(opts.Bot.ASRSpeechMaxSec) * time.Second
+			pCfg.ASRSpeechMax = time.Duration(opts.Bot.ASRSpeechMaxSec * float64(time.Second))
 		}
 		// ASRSingleSentence is a true bool (no zero-value sentinel), so it
 		// always overlays. Operators set the default in the bot row, not env.

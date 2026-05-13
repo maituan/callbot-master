@@ -273,13 +273,13 @@ var errClientClosed = errors.New("client closed")
 // asr_partial frames for UI animation).
 func (s *voiceState) listen(ctx context.Context, audioCh <-chan []byte) (string, error) {
 	stream, err := s.asrCli.StartStream(ctx, asr.StreamOpts{
-		ConversationID:  "web-" + s.sess.ID.String(),
-		SampleRate:      s.asrRate,
-		Channels:        1,
-		SingleSentence:  s.bot.ASRSingleSentence,
-		SilenceTimeoutMs: s.bot.ASRSilenceTimeoutSec * 1000,
-		SpeechTimeoutMs:  s.bot.ASRSpeechTimeoutSec * 1000,
-		SpeechMaxMs:      s.bot.ASRSpeechMaxSec * 1000,
+		ConversationID:   "web-" + s.sess.ID.String(),
+		SampleRate:       s.asrRate,
+		Channels:         1,
+		SingleSentence:   s.bot.ASRSingleSentence,
+		SilenceTimeoutMs: int(s.bot.ASRSilenceTimeoutSec * 1000),
+		SpeechTimeoutMs:  int(s.bot.ASRSpeechTimeoutSec * 1000),
+		SpeechMaxMs:      int(s.bot.ASRSpeechMaxSec * 1000),
 	})
 	if err != nil {
 		return "", fmt.Errorf("asr start: %w", err)
@@ -654,8 +654,8 @@ func (s *voiceState) bargeMonitor(ctx context.Context, cancel context.CancelFunc
 		Channels:         1,
 		SingleSentence:   true,
 		SilenceTimeoutMs: 60000,
-		SpeechTimeoutMs:  s.bot.ASRSpeechTimeoutSec * 1000,
-		SpeechMaxMs:      s.bot.ASRSpeechMaxSec * 1000,
+		SpeechTimeoutMs:  int(s.bot.ASRSpeechTimeoutSec * 1000),
+		SpeechMaxMs:      int(s.bot.ASRSpeechMaxSec * 1000),
 	})
 	if err != nil {
 		s.logger.Debug("barge asr start", "err", err)

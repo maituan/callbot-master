@@ -482,9 +482,10 @@ type botWriteRequest struct {
 
 	TTSVoiceID           string  `json:"tts_voice_id"`
 	TTSTempo             float64 `json:"tts_tempo"`
-	ASRSilenceTimeoutSec int     `json:"asr_silence_timeout_sec"`
-	ASRSpeechTimeoutSec  int     `json:"asr_speech_timeout_sec"`
-	ASRSpeechMaxSec      int     `json:"asr_speech_max_sec"`
+	// Sub-second tunable on Viettel ASR — accept float64 from JSON.
+	ASRSilenceTimeoutSec float64 `json:"asr_silence_timeout_sec"`
+	ASRSpeechTimeoutSec  float64 `json:"asr_speech_timeout_sec"`
+	ASRSpeechMaxSec      float64 `json:"asr_speech_max_sec"`
 	ASRSingleSentence    *bool   `json:"asr_single_sentence,omitempty"`
 
 	BargeInEnabled  *bool `json:"bargein_enabled,omitempty"`
@@ -538,9 +539,9 @@ func (req *botWriteRequest) toWriteInput(tenantID uuid.UUID, actor *uuid.UUID, f
 		ReplaceTTSToken:       replaceTTS,
 		TTSVoiceID:            req.TTSVoiceID,
 		TTSTempo:              defaultFloat(req.TTSTempo, 1.0),
-		ASRSilenceTimeoutSec:  defaultInt(req.ASRSilenceTimeoutSec, 5),
-		ASRSpeechTimeoutSec:   defaultInt(req.ASRSpeechTimeoutSec, 1),
-		ASRSpeechMaxSec:       defaultInt(req.ASRSpeechMaxSec, 30),
+		ASRSilenceTimeoutSec:  defaultFloat(req.ASRSilenceTimeoutSec, 5),
+		ASRSpeechTimeoutSec:   defaultFloat(req.ASRSpeechTimeoutSec, 1),
+		ASRSpeechMaxSec:       defaultFloat(req.ASRSpeechMaxSec, 30),
 		ASRSingleSentence:     coalesceBool(req.ASRSingleSentence, true),
 		BargeInEnabled:        coalesceBool(req.BargeInEnabled, true),
 		BargeInMinWords:       defaultInt(req.BargeInMinWords, 3),
