@@ -420,6 +420,17 @@ readLoop:
 // to feed into the next Speak directly (no follow-up Listen needed).
 func (p *Pipeline) Speak(ctx context.Context, src AudioSource, sinkArg AudioSink, message string) (bot.Action, error) {
 	startedAt := time.Now()
+	// Snapshot the previous turn's outcome BEFORE resetting per-turn
+	// state. `prevTurnSilent` is true when the prior turn was
+	// interrupted by barge-in before any TTS frame reached the FS
+	// FIFO — i.e. the caller is still mid-sentence and we never had
+	// a chance to reply. In that case the user's new transcript is
+	// usually just continuation ("ậm…", "à khoan…", "thôi") rather
+	// than a fresh question, so we short-circuit the intent classify
+	// and cue a short filler immediately to keep the response feeling
+	// responsive instead of stalling on another HTTP roundtrip.
+	prevTurnSilent := p.lastBargedIn && p.lastFirstAudioAt == nil
+
 	// Reset per-turn capture: lastFirstAudioAt populates on first TTS
 	// frame inside this Speak. Greeting / barged-pre-audio turns leave
 	// it nil so persistence skips the field.
@@ -465,7 +476,7 @@ func (p *Pipeline) Speak(ctx context.Context, src AudioSource, sinkArg AudioSink
 	// fillerCtrl. The main flow calls fillerCtrl.Cancel() on first TTS
 	// frame (still works whether or not the controller has decided).
 	firstSentenceCh := make(chan struct{})
-	fillerCtrl := newFillerController(ctx, p, message, useLazySink, firstSentenceCh)
+	fillerCtrl := newFillerController(ctx, p, message, useLazySink, firstSentenceCh, prevTurnSilent)
 	defer fillerCtrl.Cancel()
 
 	// bot.turn covers the LLM call (request → action). Lifetime extends past

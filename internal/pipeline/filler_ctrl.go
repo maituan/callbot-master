@@ -36,7 +36,13 @@ type fillerController struct {
 // otherwise we don't want filler at all (greeting / offline tests /
 // barge-in interjection) and the controller becomes a no-op that
 // still honours Cancel().
-func newFillerController(parent context.Context, p *Pipeline, transcript string, active bool, firstSentenceCh <-chan struct{}) *fillerController {
+//
+// forceShort skips the intent classify entirely and cues a short
+// filler. Used when the previous turn never produced any TTS audio
+// (barged before first frame) — the caller is typically mid-thought,
+// so we don't burn an intent HTTP roundtrip on what is effectively a
+// continuation of the same conversation moment.
+func newFillerController(parent context.Context, p *Pipeline, transcript string, active bool, firstSentenceCh <-chan struct{}, forceShort bool) *fillerController {
 	ctrl := &fillerController{done: make(chan struct{})}
 
 	wanted := active && transcript != "" && p.Cfg.FillerEnabled && p.Filler != nil
@@ -53,7 +59,9 @@ func newFillerController(parent context.Context, p *Pipeline, transcript string,
 	// the resolver fire-and-forget — even if the decider picks
 	// firstSentenceCh first, the resolver writes once and exits.
 	decisionCh := make(chan filler.Kind, 1)
-	resolverWanted := p.FillerKindResolver != nil
+	// forceShort bypasses the resolver wiring entirely so the decider
+	// goes straight to the "no resolver" branch (default short).
+	resolverWanted := !forceShort && p.FillerKindResolver != nil
 	if resolverWanted {
 		go func() {
 			resCtx := ctx

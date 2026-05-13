@@ -221,7 +221,7 @@ func (s *voiceState) run(parent context.Context) error {
 		return err
 	}
 	turnIdx++
-	if err := s.runBotTurn(ctx, audioCh, turnIdx, "" /* no user message */); err != nil {
+	if err := s.runBotTurn(ctx, audioCh, turnIdx, "" /* no user message */, false); err != nil {
 		return err
 	}
 
@@ -256,7 +256,7 @@ func (s *voiceState) run(parent context.Context) error {
 			return err
 		}
 		turnIdx++
-		if err := s.runBotTurn(ctx, audioCh, turnIdx, userText); err != nil {
+		if err := s.runBotTurn(ctx, audioCh, turnIdx, userText, false); err != nil {
 			return err
 		}
 		// runBotTurn sets state to "speaking" internally and emits
@@ -339,8 +339,13 @@ func (s *voiceState) listen(ctx context.Context, audioCh <-chan []byte) (string,
 // >= BargeMinWords, we cancel TTS, send "interrupt", and treat the
 // transcript as the next user turn.
 //
+// forceShortFiller bypasses the intent classify for this turn and
+// forces a short filler — used when the previous turn was barged
+// before any TTS audio reached the browser, so the user is in the
+// middle of speaking and an intent roundtrip would just add latency.
+//
 // Returns errEndCall if action was ENDCALL.
-func (s *voiceState) runBotTurn(ctx context.Context, audioCh <-chan []byte, turnIdx int, userText string) error {
+func (s *voiceState) runBotTurn(ctx context.Context, audioCh <-chan []byte, turnIdx int, userText string, forceShortFiller bool) error {
 	turnCtx, cancelTurn := context.WithCancel(ctx)
 	defer cancelTurn()
 
@@ -349,9 +354,9 @@ func (s *voiceState) runBotTurn(ctx context.Context, audioCh <-chan []byte, turn
 	// dead. Skipped on greeting turns since user hasn't spoken yet.
 	// In hybrid mode we classify the transcript first; BUSINESS picks
 	// from <voice>/long/, CHITCHAT or any failure falls back to flat
-	// short pool.
+	// short pool. forceShortFiller skips the classify entirely.
 	if userText != "" && s.fillerDir != "" && s.bot.TTSVoiceID != "" {
-		go s.playFiller(turnCtx, userText)
+		go s.playFiller(turnCtx, userText, forceShortFiller)
 	}
 
 	// Bot stream.
@@ -493,11 +498,15 @@ func (s *voiceState) runBotTurn(ctx context.Context, audioCh <-chan []byte, turn
 				ASRFinalAt: &now,
 			})
 			// Treat barge-in as the start of the next user turn — emit
-			// THINKING and run bot reply directly.
+			// THINKING and run bot reply directly. If this turn never
+			// played any TTS audio (firstAudioAt nil), force short
+			// filler on the recursive turn since the visitor is still
+			// mid-thought and another intent call would just stall.
 			if err := s.sendState("thinking"); err != nil {
 				return err
 			}
-			return s.runBotTurn(ctx, audioCh, turnIdx+1, txt)
+			prevSilent := firstAudioAt.Load() == nil
+			return s.runBotTurn(ctx, audioCh, turnIdx+1, txt, prevSilent)
 		}
 	}
 
@@ -520,8 +529,15 @@ func (s *voiceState) runBotTurn(ctx context.Context, audioCh <-chan []byte, turn
 // as real TTS — real TTS naturally queues after.
 //
 // File format assumed: canonical RIFF/WAVE with 44-byte header.
-func (s *voiceState) playFiller(ctx context.Context, transcript string) {
-	kind := s.resolveFillerKind(ctx, transcript)
+// forceShort skips intent classify and uses short directly — see
+// runBotTurn for when that's true (continuation after silent barge-in).
+func (s *voiceState) playFiller(ctx context.Context, transcript string, forceShort bool) {
+	var kind intent.Kind
+	if forceShort {
+		kind = intent.KindShort
+	} else {
+		kind = s.resolveFillerKind(ctx, transcript)
+	}
 
 	dir := filepath.Join(s.fillerDir, s.bot.TTSVoiceID)
 	if kind == intent.KindLong {
