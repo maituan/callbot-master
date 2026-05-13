@@ -62,10 +62,18 @@ func (p *SentenceParser) Finalize() (leftover string, action Action) {
 	action = ActionChat
 	if i := strings.LastIndex(full, "|"); i >= 0 {
 		contentEnd = i
+		// Prefix-match the action token so junk appended by an HTTP
+		// proxy (e.g. nginx 1.18 inlining `Content-Length: 0` after
+		// the last chunk) doesn't break ENDCALL detection. The bot
+		// only ever emits CHAT or ENDCALL as the very first word
+		// after the `|`, so anything trailing is noise we can drop.
 		raw := strings.TrimSpace(full[i+1:])
-		switch Action(raw) {
-		case ActionChat, ActionEndCall:
-			action = Action(raw)
+		upper := strings.ToUpper(raw)
+		switch {
+		case strings.HasPrefix(upper, string(ActionEndCall)):
+			action = ActionEndCall
+		case strings.HasPrefix(upper, string(ActionChat)):
+			action = ActionChat
 		default:
 			// Unknown / empty → default to CHAT, log responsibility falls
 			// to the caller (HTTP stream wraps this).

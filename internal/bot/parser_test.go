@@ -117,6 +117,28 @@ func TestParser_UnknownActionDefaultsToChat(t *testing.T) {
 	}
 }
 
+// nginx 1.18 occasionally inlines the chunked-encoding trailer
+// (e.g. "Content-Length: 0") into the response body. The parser must
+// still recognise the action prefix so ENDCALL doesn't degrade to CHAT.
+func TestParser_ActionWithTrailerSuffix(t *testing.T) {
+	cases := []struct {
+		in   string
+		want Action
+	}{
+		{"Dạ em chào.|CHATContent-Length: 0", ActionChat},
+		{"Tạm biệt.|ENDCALLContent-Length: 0", ActionEndCall},
+		{"Vâng.|ENDCALL\r\nContent-Length: 0\r\n\r\n", ActionEndCall},
+	}
+	for _, c := range cases {
+		p := &SentenceParser{}
+		feedAll(p, []string{c.in})
+		_, action := p.Finalize()
+		if action != c.want {
+			t.Errorf("input %q: action=%q want=%q", c.in, action, c.want)
+		}
+	}
+}
+
 func TestParser_ChunkBoundaryInsideRune(t *testing.T) {
 	// Vietnamese chars are multi-byte UTF-8; ensure the parser handles
 	// chunk boundaries that fall inside a rune.
