@@ -64,17 +64,42 @@ func (c *HTTPClient) Stream(parent context.Context, conversationID, message stri
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/plain")
 
+	// Measure first-byte explicitly so the resulting log line lets ops
+	// tell apart "configured timeout fired" from "headers came back in
+	// 4.9 s, dangerously close to the limit". Both look the same in
+	// the error message otherwise.
+	reqStart := time.Now()
 	resp, err := c.client.Do(req)
+	firstByteMs := time.Since(reqStart).Milliseconds()
 	if err != nil {
 		cancel()
+		slog.Warn("bot first_byte failed",
+			"conversation_id", conversationID,
+			"url", c.url,
+			"msg_len", len(message),
+			"elapsed_ms", firstByteMs,
+			"first_byte_timeout_ms", c.firstByteTimeout.Milliseconds(),
+			"err", err.Error())
 		return nil, fmt.Errorf("bot request: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		_ = resp.Body.Close()
 		cancel()
+		slog.Warn("bot non-200 response",
+			"conversation_id", conversationID,
+			"url", c.url,
+			"status", resp.StatusCode,
+			"elapsed_ms", firstByteMs,
+			"body", string(b))
 		return nil, fmt.Errorf("bot status=%d body=%q", resp.StatusCode, b)
 	}
+	slog.Info("bot first_byte ok",
+		"conversation_id", conversationID,
+		"url", c.url,
+		"msg_len", len(message),
+		"elapsed_ms", firstByteMs,
+		"first_byte_timeout_ms", c.firstByteTimeout.Milliseconds())
 
 	s := &httpTurnStream{
 		ctx:            ctx,
