@@ -16,6 +16,9 @@ type Claims struct {
 	Username string     `json:"usr"`
 	Role     string     `json:"rol"`
 	TenantID *uuid.UUID `json:"tid,omitempty"`
+	// IsEvaluator opts a tenant_user into QC submissions. omitempty so
+	// pre-feature tokens (no field set) parse as false without complaints.
+	IsEvaluator bool `json:"qce,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -37,13 +40,14 @@ func NewIssuer(secret string, ttl time.Duration) (*Issuer, error) {
 }
 
 // Issue mints a token for the given identity. Expiry is now + i.ttl.
-func (i *Issuer) Issue(userID uuid.UUID, username, role string, tenantID *uuid.UUID) (string, time.Time, error) {
+func (i *Issuer) Issue(userID uuid.UUID, username, role string, tenantID *uuid.UUID, isEvaluator bool) (string, time.Time, error) {
 	exp := time.Now().Add(i.ttl)
 	claims := Claims{
-		UserID:   userID,
-		Username: username,
-		Role:     role,
-		TenantID: tenantID,
+		UserID:      userID,
+		Username:    username,
+		Role:        role,
+		TenantID:    tenantID,
+		IsEvaluator: isEvaluator,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    "callbot-master",
 			IssuedAt:  jwt.NewNumericDate(time.Now()),

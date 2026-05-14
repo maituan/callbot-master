@@ -25,9 +25,12 @@ type User struct {
 	Role         string
 	TenantID     *uuid.UUID // nil for platform_admin
 	Enabled      bool
-	LastLoginAt  *time.Time
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	// IsEvaluator gates QC routes (POST /qc/evaluate). platform_admin
+	// always implicitly passes; tenant_user must have this set.
+	IsEvaluator bool
+	LastLoginAt *time.Time
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
 }
 
 // GetUserByUsername returns nil,nil when not found (callers distinguish
@@ -35,6 +38,7 @@ type User struct {
 func (p *Postgres) GetUserByUsername(ctx context.Context, username string) (*User, error) {
 	const q = `
 SELECT id, username, password_hash, role, tenant_id, enabled,
+       COALESCE(is_evaluator, false),
        last_login_at, created_at, updated_at
 FROM users WHERE username = $1`
 	row := p.pool.QueryRow(ctx, q, username)
@@ -48,6 +52,7 @@ FROM users WHERE username = $1`
 func (p *Postgres) GetUserByID(ctx context.Context, id uuid.UUID) (*User, error) {
 	const q = `
 SELECT id, username, password_hash, role, tenant_id, enabled,
+       COALESCE(is_evaluator, false),
        last_login_at, created_at, updated_at
 FROM users WHERE id = $1`
 	row := p.pool.QueryRow(ctx, q, id)
@@ -112,6 +117,7 @@ func (p *Postgres) MarkLogin(ctx context.Context, userID uuid.UUID) {
 func (p *Postgres) ListUsers(ctx context.Context, tenantID *uuid.UUID) ([]*User, error) {
 	q := `
 SELECT id, username, password_hash, role, tenant_id, enabled,
+       COALESCE(is_evaluator, false),
        last_login_at, created_at, updated_at
 FROM users`
 	args := []any{}
@@ -187,11 +193,26 @@ func (p *Postgres) DeleteUser(ctx context.Context, id uuid.UUID) error {
 // with no platform_admin (lockout protection).
 var ErrLastAdmin = errors.New("cannot delete or demote the last platform admin")
 
+// SetUserEvaluator toggles QC eligibility. platform_admin doesn't need
+// the flag — kept on the row anyway for visibility in the admin UI.
+func (p *Postgres) SetUserEvaluator(ctx context.Context, id uuid.UUID, enabled bool) error {
+	tag, err := p.pool.Exec(ctx,
+		`UPDATE users SET is_evaluator = $1 WHERE id = $2`, enabled, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func scanUser(row scannable) (*User, error) {
 	var u User
 	if err := row.Scan(
 		&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.TenantID,
-		&u.Enabled, &u.LastLoginAt, &u.CreatedAt, &u.UpdatedAt,
+		&u.Enabled, &u.IsEvaluator,
+		&u.LastLoginAt, &u.CreatedAt, &u.UpdatedAt,
 	); err != nil {
 		return nil, err
 	}

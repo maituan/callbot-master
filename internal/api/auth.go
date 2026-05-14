@@ -79,7 +79,7 @@ func (h *authHandler) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, exp, err := h.d.Issuer.Issue(u.ID, u.Username, u.Role, u.TenantID)
+	token, exp, err := h.d.Issuer.Issue(u.ID, u.Username, u.Role, u.TenantID, u.IsEvaluator)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "issue token")
 		return
@@ -137,10 +137,11 @@ func (h *authHandler) me(w http.ResponseWriter, r *http.Request) {
 // password hash.
 func identityJSON(u *store.User) map[string]any {
 	out := map[string]any{
-		"id":       u.ID,
-		"username": u.Username,
-		"role":     u.Role,
-		"enabled":  u.Enabled,
+		"id":           u.ID,
+		"username":     u.Username,
+		"role":         u.Role,
+		"enabled":      u.Enabled,
+		"is_evaluator": u.IsEvaluator,
 	}
 	if u.TenantID != nil {
 		out["tenant_id"] = u.TenantID.String()

@@ -26,6 +26,7 @@ type UserStore interface {
 	CreateTenantUser(ctx context.Context, username, passwordHash string, tenantID uuid.UUID) (uuid.UUID, error)
 	UpdateUserPassword(ctx context.Context, userID uuid.UUID, passwordHash string) error
 	UpdateUserEnabled(ctx context.Context, id uuid.UUID, enabled bool) error
+	SetUserEvaluator(ctx context.Context, id uuid.UUID, enabled bool) error
 	DeleteUser(ctx context.Context, id uuid.UUID) error
 }
 
@@ -163,26 +164,41 @@ func (h *usersHandler) update(w http.ResponseWriter, r *http.Request, id uuid.UU
 		return
 	}
 	var body struct {
-		Enabled *bool `json:"enabled"`
+		Enabled     *bool `json:"enabled"`
+		IsEvaluator *bool `json:"is_evaluator"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	if body.Enabled == nil {
-		writeJSONError(w, http.StatusBadRequest, "nothing to update (only 'enabled' is supported)")
+	if body.Enabled == nil && body.IsEvaluator == nil {
+		writeJSONError(w, http.StatusBadRequest, "nothing to update (supports 'enabled', 'is_evaluator')")
 		return
 	}
-	if err := h.d.Store.UpdateUserEnabled(r.Context(), id, *body.Enabled); err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			writeJSONError(w, http.StatusNotFound, "user not found")
+	delta := map[string]any{}
+	if body.Enabled != nil {
+		if err := h.d.Store.UpdateUserEnabled(r.Context(), id, *body.Enabled); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				writeJSONError(w, http.StatusNotFound, "user not found")
+				return
+			}
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		writeJSONError(w, http.StatusInternalServerError, err.Error())
-		return
+		delta["enabled"] = *body.Enabled
 	}
-	recordAudit(h.d.Auditor, r, nil, "user.update", "user", id.String(), nil,
-		map[string]any{"enabled": *body.Enabled})
+	if body.IsEvaluator != nil {
+		if err := h.d.Store.SetUserEvaluator(r.Context(), id, *body.IsEvaluator); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				writeJSONError(w, http.StatusNotFound, "user not found")
+				return
+			}
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		delta["is_evaluator"] = *body.IsEvaluator
+	}
+	recordAudit(h.d.Auditor, r, nil, "user.update", "user", id.String(), nil, delta)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -285,10 +301,11 @@ func (h *usersHandler) changeOwnPassword(w http.ResponseWriter, r *http.Request)
 // userJSON returns the safe-to-expose shape (no password hash).
 func userJSON(u *store.User) map[string]any {
 	out := map[string]any{
-		"id":       u.ID,
-		"username": u.Username,
-		"role":     u.Role,
-		"enabled":  u.Enabled,
+		"id":           u.ID,
+		"username":     u.Username,
+		"role":         u.Role,
+		"enabled":      u.Enabled,
+		"is_evaluator": u.IsEvaluator,
 	}
 	if u.TenantID != nil {
 		out["tenant_id"] = u.TenantID.String()

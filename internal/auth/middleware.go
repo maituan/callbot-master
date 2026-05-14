@@ -11,14 +11,24 @@ import (
 // Identity is the authenticated principal extracted from the JWT.
 // It rides on the request context for the lifetime of the request.
 type Identity struct {
-	UserID   uuid.UUID
-	Username string
-	Role     string
-	TenantID *uuid.UUID // nil means platform_admin (sees all tenants)
+	UserID      uuid.UUID
+	Username    string
+	Role        string
+	TenantID    *uuid.UUID // nil means platform_admin (sees all tenants)
+	IsEvaluator bool       // QC gate: platform_admin always wins via CanEvaluate()
 }
 
 // IsPlatformAdmin is the load-bearing role check most handlers need.
 func (i *Identity) IsPlatformAdmin() bool { return i.Role == "platform_admin" }
+
+// CanEvaluate reports whether this identity may submit QC verdicts.
+// platform_admin is always allowed; tenant_user must be opted in.
+func (i *Identity) CanEvaluate() bool {
+	if i == nil {
+		return false
+	}
+	return i.IsPlatformAdmin() || i.IsEvaluator
+}
 
 type ctxKey struct{}
 
@@ -50,10 +60,11 @@ func Middleware(issuer *Issuer) func(http.Handler) http.Handler {
 				return
 			}
 			id := &Identity{
-				UserID:   claims.UserID,
-				Username: claims.Username,
-				Role:     claims.Role,
-				TenantID: claims.TenantID,
+				UserID:      claims.UserID,
+				Username:    claims.Username,
+				Role:        claims.Role,
+				TenantID:    claims.TenantID,
+				IsEvaluator: claims.IsEvaluator,
 			}
 			ctx := context.WithValue(r.Context(), ctxKey{}, id)
 			next.ServeHTTP(w, r.WithContext(ctx))

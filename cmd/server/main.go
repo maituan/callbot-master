@@ -287,6 +287,7 @@ func main() {
 	api.RegisterCalls(router.Mux(), api.CallsDeps{Store: callReader})
 
 	if pgStore != nil {
+		api.RegisterQC(router.Mux(), api.QCDeps{Store: pgStore})
 		api.RegisterBots(router.Mux(), api.BotsDeps{Store: pgStore, Auditor: pgStore})
 		api.RegisterTenants(router.Mux(), api.TenantsDeps{Store: pgStore, Auditor: pgStore})
 		api.RegisterUsers(router.Mux(), api.UsersDeps{Store: pgStore, Auditor: pgStore})
