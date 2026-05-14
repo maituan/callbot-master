@@ -39,6 +39,10 @@ type CallRecord struct {
 	TenantID     *uuid.UUID `json:"tenant_id,omitempty"`
 	BotID        *uuid.UUID `json:"bot_id,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
+	// QCVerdict surfaces the inline QC outcome ("" / "like" / "dislike")
+	// hydrated by Get/List via LEFT JOIN qc_evaluation. Empty when no
+	// evaluation exists yet.
+	QCVerdict string `json:"qc_verdict,omitempty"`
 }
 
 // Turn is one user→bot exchange. Greeting turn has UserText="".
@@ -78,4 +82,11 @@ type ListFilter struct {
 	// the API layer based on the caller's identity (tenant_user) and
 	// left nil for platform_admin.
 	TenantID *uuid.UUID
+	// QCStatus filters by QC evaluation state:
+	//   "" / "any"       — no filter
+	//   "evaluated"      — has any verdict
+	//   "not_evaluated"  — no row in qc_evaluation
+	//   "like"           — verdict = like
+	//   "dislike"        — verdict = dislike
+	QCStatus string
 }

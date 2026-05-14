@@ -116,14 +116,16 @@ func (p *Postgres) SetRecordingURL(ctx context.Context, callID, url string) erro
 // distinguish "not found" from "query error" without sql.ErrNoRows imports.
 func (p *Postgres) Get(ctx context.Context, callID string) (*CallRecord, error) {
 	const q = `
-SELECT call_id, direction, scenario, phone,
-       COALESCE(lead_id,''), COALESCE(gender,''), COALESCE(name,''),
-       start_time, end_time, duration_sec,
-       status, COALESCE(action,''),
-       history, COALESCE(error_message,''), COALESCE(recording_url,''),
-       tenant_id, bot_id, created_at
-FROM call_history
-WHERE call_id = $1
+SELECT c.call_id, c.direction, c.scenario, c.phone,
+       COALESCE(c.lead_id,''), COALESCE(c.gender,''), COALESCE(c.name,''),
+       c.start_time, c.end_time, c.duration_sec,
+       c.status, COALESCE(c.action,''),
+       c.history, COALESCE(c.error_message,''), COALESCE(c.recording_url,''),
+       c.tenant_id, c.bot_id, c.created_at,
+       COALESCE(qc.verdict, '')
+FROM call_history c
+LEFT JOIN qc_evaluation qc ON qc.call_id = c.call_id
+WHERE c.call_id = $1
 `
 	row := p.pool.QueryRow(ctx, q, callID)
 	r, err := scanRow(row)
@@ -157,40 +159,54 @@ func (p *Postgres) List(ctx context.Context, filter ListFilter) ([]*CallRecord, 
 		i++
 	}
 	if len(filter.Phones) > 0 {
-		add("phone = ANY($%d)", filter.Phones)
+		add("c.phone = ANY($%d)", filter.Phones)
 	} else if filter.Phone != "" {
-		add("phone = $%d", filter.Phone)
+		add("c.phone = $%d", filter.Phone)
 	}
 	if filter.Scenario != "" {
-		add("scenario = $%d", filter.Scenario)
+		add("c.scenario = $%d", filter.Scenario)
 	}
 	if filter.Direction != "" {
-		add("direction = $%d", filter.Direction)
+		add("c.direction = $%d", filter.Direction)
 	}
 	if !filter.Since.IsZero() {
-		add("start_time >= $%d", filter.Since)
+		add("c.start_time >= $%d", filter.Since)
 	}
 	if !filter.Until.IsZero() {
-		add("start_time < $%d", filter.Until)
+		add("c.start_time < $%d", filter.Until)
 	}
 	if filter.TenantID != nil {
-		add("tenant_id = $%d", *filter.TenantID)
+		add("c.tenant_id = $%d", *filter.TenantID)
+	}
+	// QC status filter — no placeholder, baked into the WHERE so we
+	// don't burn a $N slot.
+	switch filter.QCStatus {
+	case "evaluated":
+		conds = append(conds, "qc.call_id IS NOT NULL")
+	case "not_evaluated":
+		conds = append(conds, "qc.call_id IS NULL")
+	case "like":
+		conds = append(conds, "qc.verdict = 'like'")
+	case "dislike":
+		conds = append(conds, "qc.verdict = 'dislike'")
 	}
 
 	q := strings.Builder{}
 	q.WriteString(`
-SELECT call_id, direction, scenario, phone,
-       COALESCE(lead_id,''), COALESCE(gender,''), COALESCE(name,''),
-       start_time, end_time, duration_sec,
-       status, COALESCE(action,''),
-       history, COALESCE(error_message,''), COALESCE(recording_url,''),
-       tenant_id, bot_id, created_at
-FROM call_history
+SELECT c.call_id, c.direction, c.scenario, c.phone,
+       COALESCE(c.lead_id,''), COALESCE(c.gender,''), COALESCE(c.name,''),
+       c.start_time, c.end_time, c.duration_sec,
+       c.status, COALESCE(c.action,''),
+       c.history, COALESCE(c.error_message,''), COALESCE(c.recording_url,''),
+       c.tenant_id, c.bot_id, c.created_at,
+       COALESCE(qc.verdict, '')
+FROM call_history c
+LEFT JOIN qc_evaluation qc ON qc.call_id = c.call_id
 `)
 	if len(conds) > 0 {
 		q.WriteString("WHERE " + strings.Join(conds, " AND ") + "\n")
 	}
-	q.WriteString(fmt.Sprintf("ORDER BY start_time DESC LIMIT $%d OFFSET $%d", i, i+1))
+	q.WriteString(fmt.Sprintf("ORDER BY c.start_time DESC LIMIT $%d OFFSET $%d", i, i+1))
 	args = append(args, limit, filter.Offset)
 
 	rows, err := p.pool.Query(ctx, q.String(), args...)
@@ -225,6 +241,7 @@ func scanRow(row scannable) (*CallRecord, error) {
 		&r.Status, &r.Action,
 		&historyJSON, &r.ErrorMessage, &r.RecordingURL,
 		&r.TenantID, &r.BotID, &r.CreatedAt,
+		&r.QCVerdict,
 	); err != nil {
 		return nil, err
 	}

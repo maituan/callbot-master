@@ -30,6 +30,7 @@ func (h *callsHandler) exportCSV(w http.ResponseWriter, r *http.Request) {
 	f := store.ListFilter{
 		Scenario:  q.Get("scenario"),
 		Direction: q.Get("direction"),
+		QCStatus:  q.Get("qc_status"),
 		Limit:     5000,
 	}
 	// Multi-phone: accept both `?phone=a&phone=b` and `?phones=a,b,c`.
@@ -87,10 +88,17 @@ func (h *callsHandler) exportCSV(w http.ResponseWriter, r *http.Request) {
 
 	_ = cw.Write([]string{
 		"STT", "ID", "Thể loại", "SĐT", "Bắt đầu",
-		"Conversation", "Link audio", "Thời lượng (s)", "Trạng thái", "Action",
+		"Conversation", "Link audio", "Thời lượng (s)", "Trạng thái", "Action", "QC",
 	})
 
 	for i, c := range records {
+		qc := ""
+		switch c.QCVerdict {
+		case "like":
+			qc = "Đạt"
+		case "dislike":
+			qc = "Không đạt"
+		}
 		_ = cw.Write([]string{
 			strconv.Itoa(i + 1),
 			c.CallID,
@@ -102,6 +110,7 @@ func (h *callsHandler) exportCSV(w http.ResponseWriter, r *http.Request) {
 			strconv.Itoa(c.DurationSec),
 			c.Status,
 			c.Action,
+			qc,
 		})
 	}
 }

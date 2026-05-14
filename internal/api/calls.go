@@ -52,6 +52,7 @@ func (h *callsHandler) collection(w http.ResponseWriter, r *http.Request) {
 	f := store.ListFilter{
 		Scenario:  q.Get("scenario"),
 		Direction: q.Get("direction"),
+		QCStatus:  q.Get("qc_status"),
 	}
 	// Phones: ?phone=a&phone=b OR ?phones=a,b. Fall back to single
 	// phone for back-compat with the original list UI.
