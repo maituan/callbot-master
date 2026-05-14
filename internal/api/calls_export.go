@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"callbot-master/internal/auth"
 	"callbot-master/internal/store"
 )
@@ -32,6 +34,14 @@ func (h *callsHandler) exportCSV(w http.ResponseWriter, r *http.Request) {
 		Direction: q.Get("direction"),
 		QCStatus:  q.Get("qc_status"),
 		Limit:     5000,
+	}
+	if v := q.Get("bot_id"); v != "" {
+		bid, err := uuid.Parse(v)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid bot_id")
+			return
+		}
+		f.BotID = &bid
 	}
 	// Multi-phone: accept both `?phone=a&phone=b` and `?phones=a,b,c`.
 	if vs := q["phone"]; len(vs) > 1 {

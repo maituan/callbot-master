@@ -82,6 +82,9 @@ type ListFilter struct {
 	// the API layer based on the caller's identity (tenant_user) and
 	// left nil for platform_admin.
 	TenantID *uuid.UUID
+	// BotID narrows the query to a single bot — used by the QC queue
+	// picker so evaluators can review per-bot.
+	BotID *uuid.UUID
 	// QCStatus filters by QC evaluation state:
 	//   "" / "any"       — no filter
 	//   "evaluated"      — has any verdict

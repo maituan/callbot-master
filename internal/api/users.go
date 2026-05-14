@@ -27,6 +27,7 @@ type UserStore interface {
 	UpdateUserPassword(ctx context.Context, userID uuid.UUID, passwordHash string) error
 	UpdateUserEnabled(ctx context.Context, id uuid.UUID, enabled bool) error
 	SetUserEvaluator(ctx context.Context, id uuid.UUID, enabled bool) error
+	SetUserBotAdmin(ctx context.Context, id uuid.UUID, enabled bool) error
 	DeleteUser(ctx context.Context, id uuid.UUID) error
 }
 
@@ -166,13 +167,14 @@ func (h *usersHandler) update(w http.ResponseWriter, r *http.Request, id uuid.UU
 	var body struct {
 		Enabled     *bool `json:"enabled"`
 		IsEvaluator *bool `json:"is_evaluator"`
+		IsBotAdmin  *bool `json:"is_bot_admin"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	if body.Enabled == nil && body.IsEvaluator == nil {
-		writeJSONError(w, http.StatusBadRequest, "nothing to update (supports 'enabled', 'is_evaluator')")
+	if body.Enabled == nil && body.IsEvaluator == nil && body.IsBotAdmin == nil {
+		writeJSONError(w, http.StatusBadRequest, "nothing to update (supports 'enabled', 'is_evaluator', 'is_bot_admin')")
 		return
 	}
 	delta := map[string]any{}
@@ -197,6 +199,17 @@ func (h *usersHandler) update(w http.ResponseWriter, r *http.Request, id uuid.UU
 			return
 		}
 		delta["is_evaluator"] = *body.IsEvaluator
+	}
+	if body.IsBotAdmin != nil {
+		if err := h.d.Store.SetUserBotAdmin(r.Context(), id, *body.IsBotAdmin); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				writeJSONError(w, http.StatusNotFound, "user not found")
+				return
+			}
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		delta["is_bot_admin"] = *body.IsBotAdmin
 	}
 	recordAudit(h.d.Auditor, r, nil, "user.update", "user", id.String(), nil, delta)
 	w.WriteHeader(http.StatusNoContent)
@@ -301,11 +314,12 @@ func (h *usersHandler) changeOwnPassword(w http.ResponseWriter, r *http.Request)
 // userJSON returns the safe-to-expose shape (no password hash).
 func userJSON(u *store.User) map[string]any {
 	out := map[string]any{
-		"id":           u.ID,
-		"username":     u.Username,
-		"role":         u.Role,
-		"enabled":      u.Enabled,
-		"is_evaluator": u.IsEvaluator,
+		"id":            u.ID,
+		"username":      u.Username,
+		"role":          u.Role,
+		"enabled":       u.Enabled,
+		"is_evaluator":  u.IsEvaluator,
+		"is_bot_admin":  u.IsBotAdmin,
 	}
 	if u.TenantID != nil {
 		out["tenant_id"] = u.TenantID.String()

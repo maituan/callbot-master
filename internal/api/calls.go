@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"callbot-master/internal/store"
 )
 
@@ -53,6 +55,14 @@ func (h *callsHandler) collection(w http.ResponseWriter, r *http.Request) {
 		Scenario:  q.Get("scenario"),
 		Direction: q.Get("direction"),
 		QCStatus:  q.Get("qc_status"),
+	}
+	if v := q.Get("bot_id"); v != "" {
+		bid, err := uuid.Parse(v)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid bot_id")
+			return
+		}
+		f.BotID = &bid
 	}
 	// Phones: ?phone=a&phone=b OR ?phones=a,b. Fall back to single
 	// phone for back-compat with the original list UI.

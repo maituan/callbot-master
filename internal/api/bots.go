@@ -179,6 +179,10 @@ func (h *botsHandler) create(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusUnauthorized, "not authenticated")
 		return
 	}
+	if !id.CanManageBots() {
+		writeJSONError(w, http.StatusForbidden, "bot management is restricted — ask a platform admin to enable is_bot_admin on your account")
+		return
+	}
 	var req botWriteRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid json: "+err.Error())
@@ -210,6 +214,10 @@ func (h *botsHandler) update(w http.ResponseWriter, r *http.Request, botID uuid.
 	id := auth.FromContext(r.Context())
 	if id == nil {
 		writeJSONError(w, http.StatusUnauthorized, "not authenticated")
+		return
+	}
+	if !id.CanManageBots() {
+		writeJSONError(w, http.StatusForbidden, "bot management is restricted — ask a platform admin to enable is_bot_admin on your account")
 		return
 	}
 	existing, err := h.d.Store.GetBotByID(r.Context(), botID)
@@ -255,6 +263,15 @@ func (h *botsHandler) update(w http.ResponseWriter, r *http.Request, botID uuid.
 }
 
 func (h *botsHandler) delete(w http.ResponseWriter, r *http.Request, botID uuid.UUID) {
+	id := auth.FromContext(r.Context())
+	if id == nil {
+		writeJSONError(w, http.StatusUnauthorized, "not authenticated")
+		return
+	}
+	if !id.CanManageBots() {
+		writeJSONError(w, http.StatusForbidden, "bot management is restricted")
+		return
+	}
 	bot, err := h.d.Store.GetBotByID(r.Context(), botID)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "lookup bot: "+err.Error())
@@ -297,6 +314,15 @@ func (h *botsHandler) listDIDs(w http.ResponseWriter, r *http.Request, botID uui
 }
 
 func (h *botsHandler) addDID(w http.ResponseWriter, r *http.Request, botID uuid.UUID) {
+	id := auth.FromContext(r.Context())
+	if id == nil {
+		writeJSONError(w, http.StatusUnauthorized, "not authenticated")
+		return
+	}
+	if !id.CanManageBots() {
+		writeJSONError(w, http.StatusForbidden, "bot management is restricted")
+		return
+	}
 	bot, err := h.d.Store.GetBotByID(r.Context(), botID)
 	if err != nil || bot == nil {
 		writeJSONError(w, http.StatusNotFound, "bot not found")
@@ -333,6 +359,15 @@ func (h *botsHandler) addDID(w http.ResponseWriter, r *http.Request, botID uuid.
 }
 
 func (h *botsHandler) removeDID(w http.ResponseWriter, r *http.Request, botID uuid.UUID, did string) {
+	id := auth.FromContext(r.Context())
+	if id == nil {
+		writeJSONError(w, http.StatusUnauthorized, "not authenticated")
+		return
+	}
+	if !id.CanManageBots() {
+		writeJSONError(w, http.StatusForbidden, "bot management is restricted")
+		return
+	}
 	bot, err := h.d.Store.GetBotByID(r.Context(), botID)
 	if err != nil || bot == nil {
 		writeJSONError(w, http.StatusNotFound, "bot not found")

@@ -28,6 +28,11 @@ type User struct {
 	// IsEvaluator gates QC routes (POST /qc/evaluate). platform_admin
 	// always implicitly passes; tenant_user must have this set.
 	IsEvaluator bool
+	// IsBotAdmin gates write access to /api/v1/bots/* and similar
+	// management surfaces. Default TRUE for back-compat (existing
+	// tenant_user accounts retain their bot-manage powers); admin
+	// flips off for QC-only personnel.
+	IsBotAdmin  bool
 	LastLoginAt *time.Time
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
@@ -39,6 +44,7 @@ func (p *Postgres) GetUserByUsername(ctx context.Context, username string) (*Use
 	const q = `
 SELECT id, username, password_hash, role, tenant_id, enabled,
        COALESCE(is_evaluator, false),
+       COALESCE(is_bot_admin, true),
        last_login_at, created_at, updated_at
 FROM users WHERE username = $1`
 	row := p.pool.QueryRow(ctx, q, username)
@@ -53,6 +59,7 @@ func (p *Postgres) GetUserByID(ctx context.Context, id uuid.UUID) (*User, error)
 	const q = `
 SELECT id, username, password_hash, role, tenant_id, enabled,
        COALESCE(is_evaluator, false),
+       COALESCE(is_bot_admin, true),
        last_login_at, created_at, updated_at
 FROM users WHERE id = $1`
 	row := p.pool.QueryRow(ctx, q, id)
@@ -118,6 +125,7 @@ func (p *Postgres) ListUsers(ctx context.Context, tenantID *uuid.UUID) ([]*User,
 	q := `
 SELECT id, username, password_hash, role, tenant_id, enabled,
        COALESCE(is_evaluator, false),
+       COALESCE(is_bot_admin, true),
        last_login_at, created_at, updated_at
 FROM users`
 	args := []any{}
@@ -207,11 +215,25 @@ func (p *Postgres) SetUserEvaluator(ctx context.Context, id uuid.UUID, enabled b
 	return nil
 }
 
+// SetUserBotAdmin toggles bot-management eligibility. Same semantics
+// as SetUserEvaluator — platform_admin always wins via Identity.CanManageBots.
+func (p *Postgres) SetUserBotAdmin(ctx context.Context, id uuid.UUID, enabled bool) error {
+	tag, err := p.pool.Exec(ctx,
+		`UPDATE users SET is_bot_admin = $1 WHERE id = $2`, enabled, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func scanUser(row scannable) (*User, error) {
 	var u User
 	if err := row.Scan(
 		&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.TenantID,
-		&u.Enabled, &u.IsEvaluator,
+		&u.Enabled, &u.IsEvaluator, &u.IsBotAdmin,
 		&u.LastLoginAt, &u.CreatedAt, &u.UpdatedAt,
 	); err != nil {
 		return nil, err

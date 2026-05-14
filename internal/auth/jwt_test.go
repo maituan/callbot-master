@@ -15,7 +15,7 @@ func TestIssueAndParse(t *testing.T) {
 	}
 	uid := uuid.New()
 	tid := uuid.New()
-	tok, exp, err := iss.Issue(uid, "alice", "tenant_user", &tid, true)
+	tok, exp, err := iss.Issue(uid, "alice", "tenant_user", &tid, true, false)
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
@@ -42,7 +42,7 @@ func TestIssueAndParse(t *testing.T) {
 
 func TestParseRejectsTamper(t *testing.T) {
 	iss, _ := NewIssuer("this-is-a-fake-test-secret-1234567890", time.Hour)
-	tok, _, _ := iss.Issue(uuid.New(), "x", "platform_admin", nil, false)
+	tok, _, _ := iss.Issue(uuid.New(), "x", "platform_admin", nil, false, false)
 	// Mutate the signature segment by appending a char so the base64-decoded
 	// signature no longer matches.
 	tampered := tok + "x"

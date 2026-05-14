@@ -16,6 +16,7 @@ type Identity struct {
 	Role        string
 	TenantID    *uuid.UUID // nil means platform_admin (sees all tenants)
 	IsEvaluator bool       // QC gate: platform_admin always wins via CanEvaluate()
+	IsBotAdmin  bool       // bot CRUD gate: platform_admin always wins
 }
 
 // IsPlatformAdmin is the load-bearing role check most handlers need.
@@ -28,6 +29,17 @@ func (i *Identity) CanEvaluate() bool {
 		return false
 	}
 	return i.IsPlatformAdmin() || i.IsEvaluator
+}
+
+// CanManageBots reports whether this identity may write to bot
+// configuration endpoints (PATCH/POST/DELETE). Read remains open to
+// every authenticated tenant member so QC users can still see which
+// bot a call belongs to.
+func (i *Identity) CanManageBots() bool {
+	if i == nil {
+		return false
+	}
+	return i.IsPlatformAdmin() || i.IsBotAdmin
 }
 
 type ctxKey struct{}
@@ -65,6 +77,7 @@ func Middleware(issuer *Issuer) func(http.Handler) http.Handler {
 				Role:        claims.Role,
 				TenantID:    claims.TenantID,
 				IsEvaluator: claims.IsEvaluator,
+				IsBotAdmin:  claims.IsBotAdmin,
 			}
 			ctx := context.WithValue(r.Context(), ctxKey{}, id)
 			next.ServeHTTP(w, r.WithContext(ctx))

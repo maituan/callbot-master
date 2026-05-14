@@ -178,6 +178,9 @@ func (p *Postgres) List(ctx context.Context, filter ListFilter) ([]*CallRecord, 
 	if filter.TenantID != nil {
 		add("c.tenant_id = $%d", *filter.TenantID)
 	}
+	if filter.BotID != nil {
+		add("c.bot_id = $%d", *filter.BotID)
+	}
 	// QC status filter — no placeholder, baked into the WHERE so we
 	// don't burn a $N slot.
 	switch filter.QCStatus {
