@@ -13,6 +13,29 @@ import (
 	pb "callbot-master/proto/streaming_voice"
 )
 
+func TestToSecStr(t *testing.T) {
+	cases := []struct {
+		ms   int
+		want string
+	}{
+		{0, "0"},
+		{-1, "0"},
+		{500, "0.5"},
+		{800, "0.8"},
+		{1000, "1"},
+		{1500, "1.5"},
+		{1200, "1.2"},
+		{30000, "30"},
+		{12750, "12.75"},
+	}
+	for _, c := range cases {
+		got := toSecStr(c.ms)
+		if got != c.want {
+			t.Errorf("toSecStr(%d) = %q, want %q", c.ms, got, c.want)
+		}
+	}
+}
+
 // fakeServer implements StreamVoiceServer with a caller-provided handler.
 type fakeServer struct {
 	pb.UnimplementedStreamVoiceServer

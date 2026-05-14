@@ -191,16 +191,16 @@ func boolStr(b bool) string {
 	return "false"
 }
 
-// Viettel ASR's metadata fields expect *integer seconds* as a string —
-// "1" / "5" / "30", never "0.8" or "1s". Sub-second values are rounded UP
-// to 1 so a config of e.g. 800ms doesn't silently become 0.
+// toSecStr formats a millisecond value as the seconds string Viettel
+// ASR expects on the gRPC metadata. The newer endpoint accepts
+// fractional seconds ("0.8", "1.5") so we preserve the decimal part
+// instead of truncating — `strconv.FormatFloat` with precision=-1
+// emits the shortest round-trippable representation, so 1000ms still
+// renders as "1" (not "1.000"). Negative or zero ms → "0".
 func toSecStr(ms int) string {
 	if ms <= 0 {
 		return "0"
 	}
-	s := ms / 1000
-	if s == 0 {
-		s = 1
-	}
-	return strconv.Itoa(s)
+	secs := float64(ms) / 1000.0
+	return strconv.FormatFloat(secs, 'f', -1, 64)
 }
