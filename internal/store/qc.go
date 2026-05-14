@@ -20,9 +20,14 @@ type QCEvaluation struct {
 	// EvaluatorName is hydrated by GetQCEvaluation for display — the
 	// CRUD insert ignores it.
 	EvaluatorName string
-	Verdict       string // "like" | "dislike"
+	Verdict       string // "like" | "dislike" | "skipped"
 	Reason        string
 	CreatedAt     time.Time
+	UpdatedAt     time.Time
+	// LastUpdatedBy is the most recent reviewer to touch the row; may
+	// differ from EvaluatorID (original creator) when another reviewer
+	// later overwrites the verdict.
+	LastUpdatedBy *uuid.UUID
 }
 
 // QCWriteInput is the user-facing slice of QCEvaluation: id +
@@ -35,35 +40,35 @@ type QCWriteInput struct {
 	Reason      string
 }
 
-// ErrQCAlreadyEvaluated is returned when a verdict already exists for
-// the call — verdicts are one-shot to keep audit integrity.
-var ErrQCAlreadyEvaluated = errors.New("call already has an evaluation")
-
 // ErrQCReasonRequired is returned when verdict=dislike but reason is
 // missing or too short (<10 chars after trim).
 var ErrQCReasonRequired = errors.New("dislike requires a reason of at least 10 characters")
 
-// CreateQCEvaluation inserts a verdict and snapshots the call's
-// tenant_id alongside. UNIQUE(call_id) bubbles up as ErrQCAlreadyEvaluated.
-func (p *Postgres) CreateQCEvaluation(ctx context.Context, in QCWriteInput) (*QCEvaluation, error) {
+// UpsertQCEvaluation creates or overwrites the verdict for a call.
+// The original `evaluator_id` is preserved across edits (audit trail);
+// `last_updated_by` captures whoever last touched it. Reason is
+// required for verdict='dislike' (≥10 chars after trim), optional for
+// 'like', and ignored for 'skipped'.
+func (p *Postgres) UpsertQCEvaluation(ctx context.Context, in QCWriteInput) (*QCEvaluation, error) {
 	if in.CallID == "" || in.EvaluatorID == uuid.Nil {
 		return nil, errors.New("call_id and evaluator_id required")
 	}
 	switch in.Verdict {
 	case "like":
-		in.Reason = strings.TrimSpace(in.Reason) // optional praise note
+		in.Reason = strings.TrimSpace(in.Reason)
 	case "dislike":
 		in.Reason = strings.TrimSpace(in.Reason)
 		if len(in.Reason) < 10 {
 			return nil, ErrQCReasonRequired
 		}
+	case "skipped":
+		// Skipped doesn't carry a reason — clear any stray text.
+		in.Reason = ""
 	default:
 		return nil, fmt.Errorf("invalid verdict: %q", in.Verdict)
 	}
 
-	// Snapshot tenant_id from the call. Reject if the call doesn't
-	// belong to a tenant (legacy rows pre-tenancy) — those can't be
-	// QC-scoped safely.
+	// Snapshot tenant_id from the call.
 	var tenantID *uuid.UUID
 	if err := p.pool.QueryRow(ctx,
 		`SELECT tenant_id FROM call_history WHERE call_id = $1`, in.CallID,
@@ -77,10 +82,18 @@ func (p *Postgres) CreateQCEvaluation(ctx context.Context, in QCWriteInput) (*QC
 		return nil, fmt.Errorf("call %s has no tenant (legacy row, cannot QC)", in.CallID)
 	}
 
+	// Upsert: on conflict, keep the original creator + creation time
+	// but bump verdict/reason/updated_at/last_updated_by.
 	const q = `
-INSERT INTO qc_evaluation (call_id, tenant_id, evaluator_id, verdict, reason)
-VALUES ($1, $2, $3, $4, NULLIF($5,''))
-RETURNING id, created_at`
+INSERT INTO qc_evaluation
+    (call_id, tenant_id, evaluator_id, verdict, reason, last_updated_by)
+VALUES ($1, $2, $3, $4, NULLIF($5,''), $3)
+ON CONFLICT (call_id) DO UPDATE SET
+    verdict         = EXCLUDED.verdict,
+    reason          = EXCLUDED.reason,
+    updated_at      = now(),
+    last_updated_by = EXCLUDED.evaluator_id
+RETURNING id, created_at, updated_at`
 	out := &QCEvaluation{
 		CallID:      in.CallID,
 		TenantID:    *tenantID,
@@ -90,13 +103,17 @@ RETURNING id, created_at`
 	}
 	if err := p.pool.QueryRow(ctx, q,
 		in.CallID, *tenantID, in.EvaluatorID, in.Verdict, in.Reason,
-	).Scan(&out.ID, &out.CreatedAt); err != nil {
-		if isUniqueViolation(err) {
-			return nil, ErrQCAlreadyEvaluated
-		}
-		return nil, fmt.Errorf("insert qc_evaluation: %w", err)
+	).Scan(&out.ID, &out.CreatedAt, &out.UpdatedAt); err != nil {
+		return nil, fmt.Errorf("upsert qc_evaluation: %w", err)
 	}
 	return out, nil
+}
+
+// CreateQCEvaluation is kept as a thin alias for back-compat with the
+// existing handler — semantics now match UpsertQCEvaluation (last
+// writer wins instead of erroring on duplicate).
+func (p *Postgres) CreateQCEvaluation(ctx context.Context, in QCWriteInput) (*QCEvaluation, error) {
+	return p.UpsertQCEvaluation(ctx, in)
 }
 
 // GetQCEvaluationByCallID returns the verdict for one call (with the
@@ -105,14 +122,16 @@ func (p *Postgres) GetQCEvaluationByCallID(ctx context.Context, callID string) (
 	const q = `
 SELECT q.id, q.call_id, q.tenant_id, q.evaluator_id,
        COALESCE(u.username, ''),
-       q.verdict, COALESCE(q.reason, ''), q.created_at
+       q.verdict, COALESCE(q.reason, ''),
+       q.created_at, q.updated_at, q.last_updated_by
 FROM qc_evaluation q
 JOIN users u ON u.id = q.evaluator_id
 WHERE q.call_id = $1`
 	out := &QCEvaluation{}
 	err := p.pool.QueryRow(ctx, q, callID).Scan(
 		&out.ID, &out.CallID, &out.TenantID, &out.EvaluatorID,
-		&out.EvaluatorName, &out.Verdict, &out.Reason, &out.CreatedAt,
+		&out.EvaluatorName, &out.Verdict, &out.Reason,
+		&out.CreatedAt, &out.UpdatedAt, &out.LastUpdatedBy,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil

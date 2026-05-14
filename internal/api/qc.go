@@ -77,8 +77,8 @@ func (h *qcHandler) evaluate(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "call_id required")
 		return
 	}
-	if body.Verdict != "like" && body.Verdict != "dislike" {
-		writeJSONError(w, http.StatusBadRequest, "verdict must be 'like' or 'dislike'")
+	if body.Verdict != "like" && body.Verdict != "dislike" && body.Verdict != "skipped" {
+		writeJSONError(w, http.StatusBadRequest, "verdict must be 'like', 'dislike', or 'skipped'")
 		return
 	}
 
@@ -106,9 +106,6 @@ func (h *qcHandler) evaluate(w http.ResponseWriter, r *http.Request) {
 		Reason:      body.Reason,
 	})
 	switch {
-	case errors.Is(err, store.ErrQCAlreadyEvaluated):
-		writeJSONError(w, http.StatusConflict, "call already evaluated")
-		return
 	case errors.Is(err, store.ErrQCReasonRequired):
 		writeJSONError(w, http.StatusBadRequest, "dislike requires a reason of at least 10 characters")
 		return
@@ -179,13 +176,16 @@ func qcEvaluationJSON(ev *store.QCEvaluation) map[string]any {
 		"evaluator_name": ev.EvaluatorName,
 		"verdict":        ev.Verdict,
 		"created_at":     ev.CreatedAt,
+		"updated_at":     ev.UpdatedAt,
 	}
 	if ev.Reason != "" {
 		out["reason"] = ev.Reason
 	}
-	// guard against the uuid.Nil tenant when error path leaves it unset
 	if ev.TenantID != uuid.Nil {
 		out["tenant_id"] = ev.TenantID.String()
+	}
+	if ev.LastUpdatedBy != nil {
+		out["last_updated_by"] = ev.LastUpdatedBy.String()
 	}
 	return out
 }

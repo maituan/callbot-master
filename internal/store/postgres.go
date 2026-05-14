@@ -189,6 +189,8 @@ func (p *Postgres) List(ctx context.Context, filter ListFilter) ([]*CallRecord, 
 		conds = append(conds, "qc.verdict = 'like'")
 	case "dislike":
 		conds = append(conds, "qc.verdict = 'dislike'")
+	case "skipped":
+		conds = append(conds, "qc.verdict = 'skipped'")
 	}
 
 	q := strings.Builder{}
