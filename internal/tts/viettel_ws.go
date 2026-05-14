@@ -88,6 +88,15 @@ func (c *ViettelClient) StartStream(ctx context.Context, opts StreamOpts) (Strea
 		},
 		"xi_api_key": c.apiKey,
 	}
+	// Surface voice_settings going on the wire so operators can sanity-
+	// check what the server actually received — useful when tuning
+	// tempo/resample from the bot UI and verifying the change reached
+	// the provider intact.
+	slog.Info("tts auth send",
+		"conversation_id", opts.ConversationID,
+		"voice_id", voice,
+		"resample_rate", resample,
+		"tempo", tempo)
 	if err := conn.WriteJSON(auth); err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("tts auth send: %w", err)
