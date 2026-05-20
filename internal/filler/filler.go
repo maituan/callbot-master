@@ -1,17 +1,20 @@
-// Package filler picks short / long pre-recorded "uhm/dạ vâng/để em
-// kiểm tra…" audio files to play while the bot is composing a reply.
-// Hides bot first-byte latency.
+// Package filler picks pre-recorded reaction audio ("uhm/dạ vâng/để
+// em kiểm tra…") to play while the bot is composing a reply, hiding
+// bot first-byte latency.
 //
-// Layout:
+// Layout — label-driven so adding/renaming intents is a data-only
+// change (drop in a folder, no code edit):
 //
-//	{BaseDir}/{voice_id}/*.wav          ← short (back-compat with the
-//	                                       original flat layout)
-//	{BaseDir}/{voice_id}/long/*.wav     ← long
+//	{BaseDir}/{voice_id}/*.wav             ← fallback short pool (flat)
+//	{BaseDir}/{voice_id}/{LABEL}/*.wav     ← per-intent, LABEL = the
+//	                                          normalised intent label
+//	                                          (e.g. PROCEDURE_NEW)
 //
-// Short scans the flat directory and skips any subdirectories so the
-// pre-existing setup keeps working unchanged. Long lives in the
-// `long/` subdirectory. Empty folder = silent behaviour (no filler);
-// PickKind returns "" so the pipeline knows to skip cueing.
+// PickLabel(voice, label) tries the label folder first and silently
+// falls back to the flat pool when the folder is missing/empty — so an
+// intent the ops team hasn't recorded audio for still gets a generic
+// "uhm" instead of dead air. Empty folder everywhere = silent (no
+// filler); the pipeline skips cueing.
 package filler
 
 import (
@@ -22,27 +25,19 @@ import (
 	"sync"
 )
 
-// Kind picks which pool a filler request lands in.
-type Kind string
-
-const (
-	KindShort Kind = "short"
-	KindLong  Kind = "long"
-)
-
-// Pool resolves filler files per voice on demand. Caches the directory
-// listing per voice for the lifetime of the process — operators
+// Pool resolves filler files per (voice, label) on demand. Caches the
+// directory listing for the lifetime of the process — operators
 // hot-swap the file set with a restart, which is fine.
 type Pool struct {
 	BaseDir string
 
 	mu    sync.RWMutex
-	cache map[poolKey][]string // (voice_id, kind) → file paths
+	cache map[poolKey][]string // (voice_id, label) → file paths
 }
 
 type poolKey struct {
 	voice string
-	kind  Kind
+	label string // "" = flat fallback pool
 }
 
 func NewPool(baseDir string) *Pool {
@@ -52,56 +47,53 @@ func NewPool(baseDir string) *Pool {
 	}
 }
 
-// Pick returns a random SHORT filler path for the voice, or "" if none
-// exists. Kept for callers (and tests) that pre-date the kind split.
+// Pick returns a random file from the flat fallback pool. Kept for
+// callers (and tests) that don't classify.
 func (p *Pool) Pick(voiceID string) string {
-	return p.PickKind(voiceID, KindShort)
+	return p.PickLabel(voiceID, "")
 }
 
-// PickKind returns a random filler path for the (voice, kind) pair. If
-// kind=long but the long pool is empty, falls back to the short pool —
-// the bot should never go silent because the long bank wasn't filled.
-// Returns "" only when both pools are empty.
-func (p *Pool) PickKind(voiceID string, kind Kind) string {
+// PickLabel returns a random filler path for the (voice, label) pair.
+// label is the normalised intent label (UPPERCASE) or "" for the flat
+// fallback. When the label folder is missing or empty, falls back to
+// the flat pool so the bot never goes silent over an unrecorded
+// intent. Returns "" only when both the label folder and the flat
+// pool are empty.
+func (p *Pool) PickLabel(voiceID, label string) string {
 	if p == nil || p.BaseDir == "" || voiceID == "" {
 		return ""
 	}
-	if kind == "" {
-		kind = KindShort
+	if label != "" {
+		if files := p.list(voiceID, label); len(files) > 0 {
+			return pickRandom(files)
+		}
+		// Label folder missing/empty → fall through to flat pool.
 	}
-	files := p.list(voiceID, kind)
-	if len(files) == 0 && kind == KindLong {
-		// Long bank missing → fall back to short so we still mask latency.
-		files = p.list(voiceID, KindShort)
-	}
-	if len(files) == 0 {
+	flat := p.list(voiceID, "")
+	if len(flat) == 0 {
 		return ""
 	}
+	return pickRandom(flat)
+}
+
+func pickRandom(files []string) string {
 	if len(files) == 1 {
 		return files[0]
 	}
 	return files[rand.Intn(len(files))]
 }
 
-// Count is exposed for log-on-startup so ops can confirm the dir was
-// found and how many files matched. Defaults to short.
+// Count reports how many files the flat fallback pool has — used for
+// log-on-startup sanity checks.
 func (p *Pool) Count(voiceID string) int {
-	return p.CountKind(voiceID, KindShort)
-}
-
-// CountKind reports how many filler files are available for one kind.
-func (p *Pool) CountKind(voiceID string, kind Kind) int {
 	if p == nil {
 		return 0
 	}
-	if kind == "" {
-		kind = KindShort
-	}
-	return len(p.list(voiceID, kind))
+	return len(p.list(voiceID, ""))
 }
 
-func (p *Pool) list(voiceID string, kind Kind) []string {
-	key := poolKey{voice: voiceID, kind: kind}
+func (p *Pool) list(voiceID, label string) []string {
+	key := poolKey{voice: voiceID, label: label}
 	p.mu.RLock()
 	if files, ok := p.cache[key]; ok {
 		p.mu.RUnlock()
@@ -115,8 +107,8 @@ func (p *Pool) list(voiceID string, kind Kind) []string {
 		return files
 	}
 	dir := filepath.Join(p.BaseDir, voiceID)
-	if kind == KindLong {
-		dir = filepath.Join(dir, "long")
+	if label != "" {
+		dir = filepath.Join(dir, label)
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -125,8 +117,8 @@ func (p *Pool) list(voiceID string, kind Kind) []string {
 	}
 	var out []string
 	for _, e := range entries {
-		// Short reads files only — skip subdirectories so the `long/`
-		// folder doesn't pollute the short pool when both coexist.
+		// Skip subdirectories — for the flat (label="") pool this
+		// keeps per-label folders out of the fallback set.
 		if e.IsDir() {
 			continue
 		}

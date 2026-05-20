@@ -8,69 +8,47 @@ import (
 	"time"
 )
 
-func TestParseLabel(t *testing.T) {
+func TestNormalizeLabel(t *testing.T) {
 	cases := []struct {
 		in   string
-		want Kind
-		ok   bool
+		want string
 	}{
-		{"BUSINESS", KindLong, true},
-		{"CHITCHAT", KindShort, true},
-		{"  BUSINESS\n", KindLong, true},
-		{"\"BUSINESS\"", KindLong, true},
-		{"business", KindLong, true},
-		{"chitchat", KindShort, true},
-		{"unknown", KindShort, false},
-		{"", KindShort, false},
+		{"PROCEDURE_NEW", "PROCEDURE_NEW"},
+		{"  procedure_field_reask\n", "PROCEDURE_FIELD_REASK"},
+		{"\"META\"", "META"},
+		{"off_topic", "OFF_TOPIC"},
+		{" 'CHITCHAT' ", "CHITCHAT"},
+		{"", ""},
+		{"   ", ""},
 	}
 	for _, c := range cases {
-		got, err := ParseLabel(c.in)
-		if got != c.want {
-			t.Errorf("ParseLabel(%q): kind=%v want=%v", c.in, got, c.want)
-		}
-		if (err == nil) != c.ok {
-			t.Errorf("ParseLabel(%q): err=%v ok=%v", c.in, err, c.ok)
+		if got := NormalizeLabel(c.in); got != c.want {
+			t.Errorf("NormalizeLabel(%q) = %q, want %q", c.in, got, c.want)
 		}
 	}
 }
 
-func TestHTTPClient_Classify_Business(t *testing.T) {
+func TestHTTPClient_Classify_Label(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
-		_, _ = w.Write([]byte("BUSINESS"))
+		_, _ = w.Write([]byte("PROCEDURE_NEW"))
 	}))
 	defer srv.Close()
 
 	c := NewHTTPClient(srv.URL)
-	got, err := c.Classify(context.Background(), "conv-1", "anh muốn hỏi thủ tục")
+	got, err := c.Classify(context.Background(), "conv-1", "thủ tục đăng ký kết hôn")
 	if err != nil {
 		t.Fatalf("classify: %v", err)
 	}
-	if got != KindLong {
-		t.Fatalf("got %v want long", got)
-	}
-}
-
-func TestHTTPClient_Classify_Chitchat(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte("CHITCHAT\n"))
-	}))
-	defer srv.Close()
-
-	c := NewHTTPClient(srv.URL)
-	got, err := c.Classify(context.Background(), "conv-1", "ờ")
-	if err != nil {
-		t.Fatalf("classify: %v", err)
-	}
-	if got != KindShort {
-		t.Fatalf("got %v want short", got)
+	if got != "PROCEDURE_NEW" {
+		t.Fatalf("got %q want PROCEDURE_NEW", got)
 	}
 }
 
 func TestHTTPClient_Classify_Timeout(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(200 * time.Millisecond)
-		_, _ = w.Write([]byte("BUSINESS"))
+		_, _ = w.Write([]byte("META"))
 	}))
 	defer srv.Close()
 
@@ -82,10 +60,8 @@ func TestHTTPClient_Classify_Timeout(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected timeout error")
 	}
-	// On any failure we fall back to short so the pipeline can keep
-	// going without branching on the error type.
-	if got != KindShort {
-		t.Fatalf("fallback should be short, got %v", got)
+	if got != "" {
+		t.Fatalf("on error label should be empty, got %q", got)
 	}
 }
 
@@ -95,7 +71,18 @@ func TestHTTPClient_EmptyURL(t *testing.T) {
 	if err != ErrNoIntent {
 		t.Fatalf("err=%v want ErrNoIntent", err)
 	}
-	if got != KindShort {
-		t.Fatalf("got %v want short", got)
+	if got != "" {
+		t.Fatalf("got %q want empty", got)
+	}
+}
+
+func TestHTTPClient_EmptyBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("   "))
+	}))
+	defer srv.Close()
+	c := NewHTTPClient(srv.URL)
+	if _, err := c.Classify(context.Background(), "x", "y"); err == nil {
+		t.Fatal("expected error on empty label body")
 	}
 }

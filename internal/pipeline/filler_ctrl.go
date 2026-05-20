@@ -5,16 +5,14 @@ import (
 	"log/slog"
 	"sync"
 	"time"
-
-	"callbot-master/internal/filler"
 )
 
 // fillerController owns the async decision flow:
 //
-//   - resolver goroutine (optional): calls Pipeline.FillerKindResolver,
-//     emits filler.Kind via decisionCh.
+//   - resolver goroutine (optional): calls Pipeline.FillerLabelResolver,
+//     emits the intent label via decisionCh.
 //   - decider goroutine: select on decisionCh, firstSentenceCh, timeout.
-//     Whoever wins picks the kind (or skips filler). On a non-skip
+//     Whoever wins picks the label (or skips filler). On a non-skip
 //     decision, calls Pipeline.Filler.Play and stores the resulting
 //     stop fn.
 //
@@ -37,11 +35,11 @@ type fillerController struct {
 // barge-in interjection) and the controller becomes a no-op that
 // still honours Cancel().
 //
-// forceShort skips the intent classify entirely and cues a short
-// filler. Used when the previous turn never produced any TTS audio
-// (barged before first frame) — the caller is typically mid-thought,
-// so we don't burn an intent HTTP roundtrip on what is effectively a
-// continuation of the same conversation moment.
+// forceShort skips the intent classify entirely and cues the flat
+// fallback filler (empty label). Used when the previous turn never
+// produced any TTS audio (barged before first frame) — the caller is
+// typically mid-thought, so we don't burn an intent HTTP roundtrip on
+// what is effectively a continuation of the same conversation moment.
 func newFillerController(parent context.Context, p *Pipeline, transcript string, active bool, firstSentenceCh <-chan struct{}, forceShort bool) *fillerController {
 	ctrl := &fillerController{done: make(chan struct{})}
 
@@ -58,10 +56,11 @@ func newFillerController(parent context.Context, p *Pipeline, transcript string,
 	// piggy-back on the decider's select. The buffered channel makes
 	// the resolver fire-and-forget — even if the decider picks
 	// firstSentenceCh first, the resolver writes once and exits.
-	decisionCh := make(chan filler.Kind, 1)
+	// Empty label = flat fallback pool.
+	decisionCh := make(chan string, 1)
 	// forceShort bypasses the resolver wiring entirely so the decider
-	// goes straight to the "no resolver" branch (default short).
-	resolverWanted := !forceShort && p.FillerKindResolver != nil
+	// goes straight to the "no resolver" branch (empty label fallback).
+	resolverWanted := !forceShort && p.FillerLabelResolver != nil
 	if resolverWanted {
 		go func() {
 			resCtx := ctx
@@ -70,13 +69,13 @@ func newFillerController(parent context.Context, p *Pipeline, transcript string,
 				resCtx, cancelInner = context.WithTimeout(ctx, p.Cfg.FillerIntentTimeout)
 				defer cancelInner()
 			}
-			kind, err := p.FillerKindResolver(resCtx, transcript)
+			label, err := p.FillerLabelResolver(resCtx, transcript)
 			if err != nil {
 				slog.Debug("filler intent resolver", "call_uuid", p.UUID, "err", err)
-				kind = filler.KindShort
+				label = "" // flat fallback
 			}
 			select {
-			case decisionCh <- kind:
+			case decisionCh <- label:
 			case <-ctx.Done():
 			}
 		}()
@@ -84,14 +83,14 @@ func newFillerController(parent context.Context, p *Pipeline, transcript string,
 
 	go func() {
 		defer close(ctrl.done)
-		kind := filler.KindShort
+		label := "" // empty → flat fallback pool
 		skip := false
 
 		switch {
 		case resolverWanted:
 			select {
-			case k := <-decisionCh:
-				kind = k
+			case l := <-decisionCh:
+				label = l
 			case <-firstSentenceCh:
 				// Bot is faster than intent — abandon filler so we
 				// don't cue audio that gets cut almost immediately.
@@ -103,7 +102,7 @@ func newFillerController(parent context.Context, p *Pipeline, transcript string,
 				return
 			}
 		default:
-			// No resolver wired → default short. Still race against
+			// No resolver wired → flat fallback. Still race against
 			// first-sentence so we don't cue when bot is already
 			// answering (rare in this branch but consistent).
 			select {
@@ -119,7 +118,7 @@ func newFillerController(parent context.Context, p *Pipeline, transcript string,
 			return
 		}
 
-		stop, ok := p.Filler.Play(ctx, p.UUID, p.Cfg.VoiceID, kind)
+		stop, ok := p.Filler.Play(ctx, p.UUID, p.Cfg.VoiceID, label)
 		if !ok {
 			return
 		}
@@ -170,7 +169,7 @@ func timeoutFloor(d time.Duration) time.Duration {
 		return 5 * time.Second
 	}
 	// Add a small margin so the resolver's own ctx times out first
-	// and the decider receives KindShort via decisionCh rather than
-	// hitting this catch-all.
+	// and the decider receives the fallback label via decisionCh
+	// rather than hitting this catch-all.
 	return d + 100*time.Millisecond
 }

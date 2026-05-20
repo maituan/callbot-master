@@ -148,8 +148,8 @@ func (r *SessionRunner) makePlaybackOpener(uuid string, logger *slog.Logger) Pla
 // stop() blocks until FS confirms PLAYBACK_STOP, with a 1.5 s safety
 // timeout — we'd rather drop the wait than deadlock the next TTS open.
 func (r *SessionRunner) makeFillerPlayer(logger *slog.Logger) FillerPlayer {
-	return fillerPlayerFunc(func(ctx context.Context, callUUID, voiceID string, kind filler.Kind) (func(), bool) {
-		path := r.Filler.PickKind(voiceID, kind)
+	return fillerPlayerFunc(func(ctx context.Context, callUUID, voiceID, label string) (func(), bool) {
+		path := r.Filler.PickLabel(voiceID, label)
 		if path == "" {
 			return nil, false
 		}
@@ -192,10 +192,10 @@ func (r *SessionRunner) makeFillerPlayer(logger *slog.Logger) FillerPlayer {
 }
 
 // fillerPlayerFunc adapts a function to the FillerPlayer interface.
-type fillerPlayerFunc func(ctx context.Context, callUUID, voiceID string, kind filler.Kind) (func(), bool)
+type fillerPlayerFunc func(ctx context.Context, callUUID, voiceID, label string) (func(), bool)
 
-func (f fillerPlayerFunc) Play(ctx context.Context, callUUID, voiceID string, kind filler.Kind) (func(), bool) {
-	return f(ctx, callUUID, voiceID, kind)
+func (f fillerPlayerFunc) Play(ctx context.Context, callUUID, voiceID, label string) (func(), bool) {
+	return f(ctx, callUUID, voiceID, label)
 }
 
 // playbackHandle wraps an *os.File so Close cleans up the FIFO file too.
@@ -475,29 +475,27 @@ func (r *SessionRunner) Run(parent context.Context, opts RunOpts) (retErr error)
 		p.Cfg.FillerEnabled = opts.Bot.FillerEnabled
 		// Hybrid filler routing: wire the resolver only when the bot
 		// explicitly opted in AND configured an intent endpoint. Empty
-		// URL → resolver stays nil → pipeline plays short. Same fallback
-		// happens on intent errors via filler_ctrl.
+		// URL → resolver stays nil → pipeline plays the flat fallback
+		// pool. Same fallback happens on intent errors via filler_ctrl.
+		// The resolver returns the raw intent label; the filler player
+		// maps label→folder (<voice>/<LABEL>/) with flat fallback, so
+		// adding/renaming intents is a data-only change.
 		if opts.Bot.FillerMode == "hybrid" && opts.Bot.FillerIntentURL != "" {
 			cli := intent.NewHTTPClient(opts.Bot.FillerIntentURL)
 			metricsRef := r.Metrics
-			p.FillerKindResolver = func(ctx context.Context, transcript string) (filler.Kind, error) {
+			p.FillerLabelResolver = func(ctx context.Context, transcript string) (string, error) {
 				started := time.Now()
-				k, err := cli.Classify(ctx, opts.UUID, transcript)
+				label, err := cli.Classify(ctx, opts.UUID, transcript)
 				if metricsRef != nil {
 					metricsRef.IntentClassifyDuration.WithLabelValues("phone").
 						Observe(time.Since(started).Seconds())
-					outcome := "fallback"
-					switch {
-					case err != nil:
+					outcome := label
+					if err != nil || outcome == "" {
 						outcome = "fallback"
-					case k == intent.KindLong:
-						outcome = "business"
-					case k == intent.KindShort:
-						outcome = "chitchat"
 					}
 					metricsRef.IntentClassifyTotal.WithLabelValues("phone", outcome).Inc()
 				}
-				return filler.Kind(k), err
+				return label, err
 			}
 			if opts.Bot.FillerIntentTimeoutMs > 0 {
 				p.Cfg.FillerIntentTimeout = time.Duration(opts.Bot.FillerIntentTimeoutMs) * time.Millisecond

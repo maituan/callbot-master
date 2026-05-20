@@ -518,36 +518,36 @@ func (s *voiceState) runBotTurn(ctx context.Context, audioCh <-chan []byte, turn
 }
 
 // playFiller streams a random filler WAV (PCM16 mono 16 kHz) for the
-// bot's voice. Layout:
+// bot's voice. Layout — label-driven, identical to the phone pipeline:
 //
-//   <fillerDir>/<voice_id>/*.wav        short pool (flat, back-compat)
-//   <fillerDir>/<voice_id>/long/*.wav   long pool (hybrid mode only)
+//   <fillerDir>/<voice_id>/*.wav            flat fallback pool
+//   <fillerDir>/<voice_id>/<LABEL>/*.wav    per-intent (PROCEDURE_NEW, …)
 //
-// In hybrid mode the user transcript is sent to the bot's intent
-// endpoint; BUSINESS → long, CHITCHAT or any failure → short. Sent as
-// tts_audio frames so the browser plays them through the same queue
-// as real TTS — real TTS naturally queues after.
+// In hybrid mode the user transcript is classified by the bot's intent
+// endpoint into a label; the matching folder is used, falling back to
+// the flat pool when it's missing/empty. Sent as tts_audio frames so
+// the browser plays them through the same queue as real TTS.
 //
 // File format assumed: canonical RIFF/WAVE with 44-byte header.
-// forceShort skips intent classify and uses short directly — see
-// runBotTurn for when that's true (continuation after silent barge-in).
+// forceShort skips intent classify and uses the flat fallback directly
+// — see runBotTurn for when that's true (continuation after a silent
+// barge-in).
 func (s *voiceState) playFiller(ctx context.Context, transcript string, forceShort bool) {
-	var kind intent.Kind
-	if forceShort {
-		kind = intent.KindShort
-	} else {
-		kind = s.resolveFillerKind(ctx, transcript)
+	label := ""
+	if !forceShort {
+		label = s.resolveFillerLabel(ctx, transcript)
 	}
 
-	dir := filepath.Join(s.fillerDir, s.bot.TTSVoiceID)
-	if kind == intent.KindLong {
-		dir = filepath.Join(dir, "long")
+	base := filepath.Join(s.fillerDir, s.bot.TTSVoiceID)
+	var dir string
+	var wavs []string
+	if label != "" {
+		dir = filepath.Join(base, label)
+		wavs = scanWavs(dir)
 	}
-	wavs := scanWavs(dir)
-	if len(wavs) == 0 && kind == intent.KindLong {
-		// Long pool missing → fall back to short so the bot never
-		// goes silent waiting for first-sentence.
-		dir = filepath.Join(s.fillerDir, s.bot.TTSVoiceID)
+	if len(wavs) == 0 {
+		// No label folder (or no label) → flat fallback pool.
+		dir = base
 		wavs = scanWavs(dir)
 	}
 	if len(wavs) == 0 {
@@ -581,12 +581,13 @@ func (s *voiceState) playFiller(ctx context.Context, transcript string, forceSho
 	}
 }
 
-// resolveFillerKind asks the intent endpoint when the bot opted into
-// hybrid mode. Errors / timeout / non-hybrid mode all collapse to
-// short — the pipeline should never block on intent.
-func (s *voiceState) resolveFillerKind(ctx context.Context, transcript string) intent.Kind {
+// resolveFillerLabel asks the intent endpoint when the bot opted into
+// hybrid mode. Returns the raw intent label, or "" on errors / timeout
+// / non-hybrid mode so playFiller falls back to the flat pool — the
+// pipeline should never block on intent.
+func (s *voiceState) resolveFillerLabel(ctx context.Context, transcript string) string {
 	if s.bot.FillerMode != "hybrid" || s.bot.FillerIntentURL == "" || transcript == "" {
-		return intent.KindShort
+		return ""
 	}
 	timeout := time.Duration(s.bot.FillerIntentTimeoutMs) * time.Millisecond
 	if timeout <= 0 {
@@ -596,26 +597,21 @@ func (s *voiceState) resolveFillerKind(ctx context.Context, transcript string) i
 	classifyCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	started := time.Now()
-	kind, err := c.Classify(classifyCtx, "web-"+s.sess.ID.String(), transcript)
+	label, err := c.Classify(classifyCtx, "web-"+s.sess.ID.String(), transcript)
 	if s.metrics != nil {
 		s.metrics.IntentClassifyDuration.WithLabelValues("web").
 			Observe(time.Since(started).Seconds())
-		outcome := "fallback"
-		switch {
-		case err != nil:
+		outcome := label
+		if err != nil || outcome == "" {
 			outcome = "fallback"
-		case kind == intent.KindLong:
-			outcome = "business"
-		case kind == intent.KindShort:
-			outcome = "chitchat"
 		}
 		s.metrics.IntentClassifyTotal.WithLabelValues("web", outcome).Inc()
 	}
 	if err != nil {
 		s.logger.Debug("intent classify", "err", err)
-		return intent.KindShort
+		return ""
 	}
-	return kind
+	return label
 }
 
 // scanWavs returns base-names of *.wav files at dir, excluding subdirs.

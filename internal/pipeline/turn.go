@@ -25,7 +25,6 @@ import (
 	"callbot-master/internal/asr"
 	"callbot-master/internal/audio"
 	"callbot-master/internal/bot"
-	"callbot-master/internal/filler"
 	"callbot-master/internal/metrics"
 	"callbot-master/internal/tts"
 	"callbot-master/internal/vad"
@@ -125,17 +124,17 @@ type Pipeline struct {
 	// directly via the SinkOverride below.
 	PlaybackOpen PlaybackOpener
 
-	// Filler plays a short / long audio file via uuid_broadcast while
-	// the bot is computing the first sentence. Stopped + drained when
-	// the first TTS audio frame arrives. nil-safe (no filler).
+	// Filler plays an intent-matched audio file via uuid_broadcast
+	// while the bot is computing the first sentence. Stopped + drained
+	// when the first TTS audio frame arrives. nil-safe (no filler).
 	Filler FillerPlayer
 
-	// FillerKindResolver, if set, classifies the user transcript into a
-	// filler.Kind (short / long). The pipeline kicks it off in a
-	// goroutine and races the result against the bot's first sentence:
-	// whichever wins decides the filler. Nil → always short.
-	// Errors from the resolver are interpreted as "use short".
-	FillerKindResolver func(ctx context.Context, transcript string) (filler.Kind, error)
+	// FillerLabelResolver, if set, classifies the user transcript into
+	// an intent label (e.g. "PROCEDURE_NEW"). The pipeline kicks it off
+	// in a goroutine and races the result against the bot's first
+	// sentence: whichever wins decides which filler folder to play.
+	// Nil or an error → empty label → flat fallback short pool.
+	FillerLabelResolver func(ctx context.Context, transcript string) (string, error)
 
 	// SinkOverride bypasses PlaybackOpen — used by offline-cli + tests
 	// where the sink is just an in-memory buffer or file.
@@ -190,14 +189,14 @@ type bargeESL interface {
 	StopPlayback(uuid string) error
 }
 
-// FillerPlayer plays a single random filler audio file of the requested
-// kind for a given voice. Returns a Stop func that uuid_breaks the
-// playback and waits for FS to confirm via PLAYBACK_STOP. ok==false
-// when no filler file is available (no folder, empty folder, voice not
-// configured, or the requested kind bank is empty and the player
-// chooses not to fall back) — caller skips.
+// FillerPlayer plays a single random filler audio file matching the
+// given intent label (empty label = flat fallback pool) for a voice.
+// Returns a Stop func that uuid_breaks the playback and waits for FS
+// to confirm via PLAYBACK_STOP. ok==false when no filler file is
+// available (no folder, empty folder, voice not configured) — caller
+// skips. The player handles label→folder resolution + flat fallback.
 type FillerPlayer interface {
-	Play(ctx context.Context, callUUID, voiceID string, kind filler.Kind) (stop func(), ok bool)
+	Play(ctx context.Context, callUUID, voiceID, label string) (stop func(), ok bool)
 }
 
 func New(uuid string, cfg Config, a asr.Client, t tts.Client, b bot.Client, v vad.Detector) *Pipeline {

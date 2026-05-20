@@ -1,16 +1,18 @@
 // Package intent classifies the user's transcript into a coarse intent
-// label so the filler pipeline can pick a long vs short reaction.
+// label so the filler pipeline can pick a matching reaction audio.
 //
-// The current upstream returns plain text:
+// The upstream returns a plain-text label, e.g.:
 //
 //	POST <url>  Content-Type: application/json  Accept: text/plain
 //	{"conversation_id":"<uuid>", "message":"<transcript>"}
 //
-//	→ 200 text/plain  "BUSINESS"  or  "CHITCHAT"
+//	→ 200 text/plain  "PROCEDURE_NEW"  (or PROCEDURE_FIELD_REASK,
+//	   META, OFF_TOPIC, CHITCHAT, … — the set is open-ended)
 //
-// Master maps BUSINESS → KindLong and CHITCHAT → KindShort. Anything
-// else (timeout, network error, unknown response body, empty URL) is a
-// soft fallback to KindShort — the pipeline never blocks on intent.
+// Master treats the label as an opaque string: the filler player maps
+// it to <voice>/<LABEL>/*.wav and falls back to the flat short pool
+// when no folder matches. That keeps adding/renaming intents a
+// data-only change (drop in an audio folder) with zero code edits.
 package intent
 
 import (
@@ -25,25 +27,14 @@ import (
 	"time"
 )
 
-// Kind mirrors filler.Kind one-to-one. Defining it here separately
-// keeps the intent package free of the filler import (would otherwise
-// be a circular dependency when filler grows).
-type Kind string
-
-const (
-	KindShort Kind = "short"
-	KindLong  Kind = "long"
-)
-
 // ErrNoIntent signals the caller hasn't configured an intent endpoint
-// (empty URL). Pipeline treats it as "use short".
+// (empty URL). Pipeline treats it as "use the fallback short pool".
 var ErrNoIntent = errors.New("intent client not configured")
 
-// Client classifies a transcript into a filler Kind. Implementations
-// must honour ctx cancellation so the pipeline can race against the
-// bot's first sentence.
+// Client classifies a transcript into an intent label. Implementations
+// must honour ctx cancellation so the pipeline can bound the wait.
 type Client interface {
-	Classify(ctx context.Context, conversationID, message string) (Kind, error)
+	Classify(ctx context.Context, conversationID, message string) (string, error)
 }
 
 // HTTPClient hits the configured `url` per call. Stateless aside from
@@ -75,53 +66,54 @@ type classifyRequest struct {
 	Message        string `json:"message"`
 }
 
-func (c *HTTPClient) Classify(ctx context.Context, conversationID, message string) (Kind, error) {
+// Classify returns the normalised label (see NormalizeLabel). On any
+// failure it returns ("", err) so the caller can fall back to the
+// short pool without inspecting the error type.
+func (c *HTTPClient) Classify(ctx context.Context, conversationID, message string) (string, error) {
 	if c == nil || c.url == "" {
-		return KindShort, ErrNoIntent
+		return "", ErrNoIntent
 	}
 	body, err := json.Marshal(classifyRequest{ConversationID: conversationID, Message: message})
 	if err != nil {
-		return KindShort, fmt.Errorf("marshal: %w", err)
+		return "", fmt.Errorf("marshal: %w", err)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url, bytes.NewReader(body))
 	if err != nil {
-		return KindShort, fmt.Errorf("build request: %w", err)
+		return "", fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/plain")
 
 	resp, err := c.c.Do(req)
 	if err != nil {
-		return KindShort, fmt.Errorf("intent request: %w", err)
+		return "", fmt.Errorf("intent request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1024))
 	if err != nil {
-		return KindShort, fmt.Errorf("intent read: %w", err)
+		return "", fmt.Errorf("intent read: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return KindShort, fmt.Errorf("intent status=%d body=%q", resp.StatusCode, raw)
+		return "", fmt.Errorf("intent status=%d body=%q", resp.StatusCode, raw)
 	}
 
-	return ParseLabel(string(raw))
+	label := NormalizeLabel(string(raw))
+	if label == "" {
+		return "", fmt.Errorf("intent returned empty label (body=%q)", raw)
+	}
+	return label, nil
 }
 
-// ParseLabel normalises the upstream label. Exposed so tests + dry-run
-// CLIs can poke at the mapping without spinning up an HTTP server.
+// NormalizeLabel trims surrounding whitespace + quotes and uppercases
+// the result so "  procedure_new\n" and "\"PROCEDURE_NEW\"" both map to
+// the same folder name. Returns "" for an all-whitespace body.
 //
-// Accepted forms (case-insensitive, surrounding whitespace + quotes
-// stripped): BUSINESS → long, CHITCHAT → short. Anything else returns
-// KindShort + a non-nil error so callers can log unexpected payloads.
-func ParseLabel(raw string) (Kind, error) {
+// Exposed so the filler player + tests share one canonicalisation rule
+// — folders must be named with the normalised (UPPERCASE) form.
+func NormalizeLabel(raw string) string {
 	s := strings.TrimSpace(raw)
 	s = strings.Trim(s, "\"'")
-	s = strings.ToUpper(s)
-	switch s {
-	case "BUSINESS":
-		return KindLong, nil
-	case "CHITCHAT":
-		return KindShort, nil
-	}
-	return KindShort, fmt.Errorf("unknown intent label %q", raw)
+	s = strings.TrimSpace(s)
+	return strings.ToUpper(s)
 }
