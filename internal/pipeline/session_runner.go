@@ -151,8 +151,7 @@ func (r *SessionRunner) makeFillerPlayer(logger *slog.Logger) FillerPlayer {
 	return fillerPlayerFunc(func(ctx context.Context, callUUID, voiceID, label string) (func(), bool) {
 		path := r.Filler.PickLabel(voiceID, label)
 		if path == "" {
-			logger.Info("filler skipped — no audio",
-				"call_uuid", callUUID, "voice", voiceID, "label", label)
+			logger.Info("filler skipped — no audio", "voice", voiceID, "label", label)
 			return nil, false
 		}
 		// Surface label + which folder actually served the file so ops
@@ -161,7 +160,7 @@ func (r *SessionRunner) makeFillerPlayer(logger *slog.Logger) FillerPlayer {
 		usedFolder := filepath.Base(filepath.Dir(path))
 		matchedLabel := label != "" && usedFolder == label
 		logger.Info("filler play",
-			"call_uuid", callUUID, "voice", voiceID,
+			"voice", voiceID,
 			"label", label, "matched_label", matchedLabel,
 			"file", filepath.Base(path))
 		h := &playbackHandle{
@@ -509,13 +508,15 @@ func (r *SessionRunner) Run(parent context.Context, opts RunOpts) (retErr error)
 				// INFO so ops can see exactly what the intent API returned
 				// and how long it took — the label drives which filler
 				// folder plays.
+				// logger already carries call_uuid/direction/scenario via
+				// slog.With — don't repeat call_uuid here.
 				if err != nil {
 					logger.Warn("filler intent classify failed",
-						"call_uuid", opts.UUID, "elapsed_ms", elapsedMs,
+						"elapsed_ms", elapsedMs,
 						"transcript", transcript, "err", err.Error())
 				} else {
 					logger.Info("filler intent classified",
-						"call_uuid", opts.UUID, "elapsed_ms", elapsedMs,
+						"elapsed_ms", elapsedMs,
 						"transcript", transcript, "label", label)
 				}
 				return label, err
