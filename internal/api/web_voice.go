@@ -551,6 +551,8 @@ func (s *voiceState) playFiller(ctx context.Context, transcript string, forceSho
 		wavs = scanWavs(dir)
 	}
 	if len(wavs) == 0 {
+		s.logger.Info("filler skipped — no audio",
+			"voice", s.bot.TTSVoiceID, "label", label)
 		return
 	}
 	pick := wavs[int(time.Now().UnixNano())%len(wavs)]
@@ -560,6 +562,10 @@ func (s *voiceState) playFiller(ctx context.Context, transcript string, forceSho
 		s.logger.Debug("filler read", "path", path, "err", err)
 		return
 	}
+	matchedLabel := label != "" && filepath.Base(dir) == label
+	s.logger.Info("filler play",
+		"voice", s.bot.TTSVoiceID, "label", label,
+		"matched_label", matchedLabel, "file", pick)
 	pcm := body[44:]
 	// Stream in 20 ms chunks @ 16 kHz mono 16-bit = 640 bytes per frame.
 	const chunkBytes = 640
@@ -598,9 +604,10 @@ func (s *voiceState) resolveFillerLabel(ctx context.Context, transcript string) 
 	defer cancel()
 	started := time.Now()
 	label, err := c.Classify(classifyCtx, "web-"+s.sess.ID.String(), transcript)
+	elapsedMs := time.Since(started).Milliseconds()
 	if s.metrics != nil {
 		s.metrics.IntentClassifyDuration.WithLabelValues("web").
-			Observe(time.Since(started).Seconds())
+			Observe(float64(elapsedMs) / 1000.0)
 		outcome := label
 		if err != nil || outcome == "" {
 			outcome = "fallback"
@@ -608,9 +615,12 @@ func (s *voiceState) resolveFillerLabel(ctx context.Context, transcript string) 
 		s.metrics.IntentClassifyTotal.WithLabelValues("web", outcome).Inc()
 	}
 	if err != nil {
-		s.logger.Debug("intent classify", "err", err)
+		s.logger.Warn("filler intent classify failed",
+			"elapsed_ms", elapsedMs, "transcript", transcript, "err", err.Error())
 		return ""
 	}
+	s.logger.Info("filler intent classified",
+		"elapsed_ms", elapsedMs, "transcript", transcript, "label", label)
 	return label
 }
 

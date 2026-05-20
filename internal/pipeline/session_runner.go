@@ -151,8 +151,19 @@ func (r *SessionRunner) makeFillerPlayer(logger *slog.Logger) FillerPlayer {
 	return fillerPlayerFunc(func(ctx context.Context, callUUID, voiceID, label string) (func(), bool) {
 		path := r.Filler.PickLabel(voiceID, label)
 		if path == "" {
+			logger.Info("filler skipped — no audio",
+				"call_uuid", callUUID, "voice", voiceID, "label", label)
 			return nil, false
 		}
+		// Surface label + which folder actually served the file so ops
+		// can tell whether the label folder matched or it fell back to
+		// the flat short pool. parent dir name == label → matched.
+		usedFolder := filepath.Base(filepath.Dir(path))
+		matchedLabel := label != "" && usedFolder == label
+		logger.Info("filler play",
+			"call_uuid", callUUID, "voice", voiceID,
+			"label", label, "matched_label", matchedLabel,
+			"file", filepath.Base(path))
 		h := &playbackHandle{
 			path:   path,
 			uuid:   callUUID,
@@ -167,7 +178,6 @@ func (r *SessionRunner) makeFillerPlayer(logger *slog.Logger) FillerPlayer {
 			logger.Warn("filler play_audio failed", "call_uuid", callUUID, "err", err)
 			return nil, false
 		}
-		logger.Debug("filler started", "call_uuid", callUUID, "path", filepath.Base(path))
 
 		stop := func() {
 			// Idempotent: doneOnce inside playbackHandle guards against
@@ -486,14 +496,27 @@ func (r *SessionRunner) Run(parent context.Context, opts RunOpts) (retErr error)
 			p.FillerLabelResolver = func(ctx context.Context, transcript string) (string, error) {
 				started := time.Now()
 				label, err := cli.Classify(ctx, opts.UUID, transcript)
+				elapsedMs := time.Since(started).Milliseconds()
 				if metricsRef != nil {
 					metricsRef.IntentClassifyDuration.WithLabelValues("phone").
-						Observe(time.Since(started).Seconds())
+						Observe(float64(elapsedMs) / 1000.0)
 					outcome := label
 					if err != nil || outcome == "" {
 						outcome = "fallback"
 					}
 					metricsRef.IntentClassifyTotal.WithLabelValues("phone", outcome).Inc()
+				}
+				// INFO so ops can see exactly what the intent API returned
+				// and how long it took — the label drives which filler
+				// folder plays.
+				if err != nil {
+					logger.Warn("filler intent classify failed",
+						"call_uuid", opts.UUID, "elapsed_ms", elapsedMs,
+						"transcript", transcript, "err", err.Error())
+				} else {
+					logger.Info("filler intent classified",
+						"call_uuid", opts.UUID, "elapsed_ms", elapsedMs,
+						"transcript", transcript, "label", label)
 				}
 				return label, err
 			}
